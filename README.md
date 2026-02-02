@@ -35,6 +35,11 @@ bash install.sh
 - `WONYODD_MAX_LEVERAGE`: 최대 추천 배율 상한
 - `WONYODD_ENTRY_ATR_K_30`, `WONYODD_ENTRY_ATR_K_60`, `WONYODD_ENTRY_ATR_K_180`: TF별 ATR 진입 배수
 - `WONYODD_STOP_ATR_MULT`: ATR 손절 배수
+- `WONYODD_MIN_ATR_PCT`, `WONYODD_MAX_ATR_PCT`: 변동성(ATR%) 허용 범위
+- `WONYODD_REQUIRE_BAR_CLOSE`: true면 “봉 마감 알림”만 수용
+- `WONYODD_VALIDATE_TS_ALIGNMENT`: true면 timeframe 정렬 timestamp만 수용
+- `WONYODD_DISCORD_WEBHOOK_URL`: 디스코드 웹훅 URL(권장)
+- `WONYODD_DISCORD_WEBHOOK_FILE`: 디스코드 웹훅이 들어있는 파일 경로(기본 `개인정보.txt`)
 
 ---
 
@@ -73,6 +78,7 @@ Message:
   "low": "{{low}}",
   "close": "{{close}}",
   "volume": "{{volume}}",
+  "bar_close_confirmed": true,
   "features": {
     "rsi14": "{{rsi}}"
   }
@@ -81,7 +87,33 @@ Message:
 
 ---
 
-## 5) 설계 메모
+## 5) TradingView 알림 권장 설정(30m/1h/3h)
+
+* 30m/1h/3h 차트 각각 알림 생성
+* 조건: `바 마감 시` (Once Per Bar Close)
+* Webhook JSON에 `bar_close_confirmed: true` 포함
+
+권장 메시지 필드:
+- `timeframe`: `30`, `60`, `180`
+- `time`: `{{time}}` (TradingView 기본 타임스탬프)
+- `bar_close_confirmed`: `true`
+
+---
+
+## 6) 디스코드 알림
+
+추천 결과를 디스코드로 전송:
+
+- API: `POST /api/notify/recommend?side=long&risk_pct=0.5`
+- 프론트: `디스코드 전송` 버튼
+
+웹훅 URL 설정 방법:
+- `.env`에 `WONYODD_DISCORD_WEBHOOK_URL` 지정(권장)
+- 또는 `개인정보.txt` 파일 내 `https://discord.com/api/webhooks/...` 라인을 자동 탐지
+
+---
+
+## 7) 설계 메모
 
 - 1D 레짐:
   - `1D close > 1D SMA200` → long_favored

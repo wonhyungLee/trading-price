@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { fetchCandles, fetchLatest, fetchRecommend, type Candle, type Scenario } from './api';
+import { fetchCandles, fetchLatest, fetchRecommend, notifyRecommend, type Candle, type Scenario } from './api';
 import PriceChart from './components/PriceChart';
 
 type Side = 'long' | 'short';
@@ -8,6 +8,11 @@ function fmt(x: any): string {
   const n = Number(x);
   if (!Number.isFinite(n)) return '-';
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+function fmtPct(x: any, digits = 2): string {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return '-';
+  return `${n.toFixed(digits)}%`;
 }
 
 function fmtTs(ts: number | undefined): string {
@@ -24,6 +29,9 @@ export default function App() {
   const [scenario, setScenario] = useState<Scenario | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
+  const [serverOffsetMs, setServerOffsetMs] = useState<number>(0);
+  const [minuteCountdown, setMinuteCountdown] = useState<number>(60);
 
   const selectedTf = rec?.plan?.tf;
 
@@ -39,6 +47,7 @@ export default function App() {
   async function runRecommend(nextSide: Side) {
     setBusy(true);
     setErr(null);
+    setNotifyMsg(null);
     try {
       const data = await fetchRecommend(nextSide, riskPct);
       if (!data.ok) {
@@ -55,7 +64,7 @@ export default function App() {
       setScenario(scen);
 
       if (tf) {
-        const c = await fetchCandles(tf, 220);
+        const c = await fetchCandles(tf, 5000);
         setCandles(c.candles ?? []);
       } else {
         setCandles([]);
@@ -68,6 +77,23 @@ export default function App() {
     }
   }
 
+  async function sendDiscord() {
+    setNotifyMsg(null);
+    try {
+      const res = await notifyRecommend(side, riskPct);
+      if (!res.ok) {
+        setNotifyMsg(res.detail ?? 'discord send failed');
+        return;
+      }
+      if (res.recommend?.ok) {
+        setRec(res.recommend);
+      }
+      setNotifyMsg('디스코드 전송 완료');
+    } catch (e: any) {
+      setNotifyMsg(e?.message ?? String(e));
+    }
+  }
+
   useEffect(() => {
     refreshLatestUI();
     // initial load
@@ -75,8 +101,72 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const syncServerTime = async () => {
+      try {
+        const apiBase = (import.meta as any).env?.VITE_API_BASE ?? '';
+        const res = await fetch(`${apiBase}/api/health`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && data?.ts) {
+          const offset = Number(data.ts) * 1000 - Date.now();
+          setServerOffsetMs(offset);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    syncServerTime();
+    const id = setInterval(syncServerTime, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    const tick = () => {
+      const now = Date.now() + serverOffsetMs;
+      const sec = Math.floor(now / 1000) % 60;
+      const remaining = sec === 0 ? 60 : 60 - sec;
+      setMinuteCountdown(remaining);
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [serverOffsetMs]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      refreshLatestUI();
+    }, 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedTf) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const c = await fetchCandles(selectedTf, 5000);
+        if (!cancelled) setCandles(c.candles ?? []);
+      } catch {
+        // ignore
+      }
+    };
+    tick();
+    const id = setInterval(tick, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [selectedTf]);
+
   const regime = rec?.regime;
   const plan = rec?.plan;
+  const selected = rec?.selected;
+  const notes: string[] = Array.isArray(rec?.notes) ? rec.notes : [];
   const candidates = useMemo(() => (Array.isArray(rec?.candidates) ? rec.candidates : []), [rec]);
 
   return (
@@ -128,12 +218,15 @@ export default function App() {
             <button className="btn" onClick={() => runRecommend(side)} disabled={busy}>
               다시 계산
             </button>
+            <button className="btn" onClick={sendDiscord} disabled={busy}>
+              디스코드 전송
+            </button>
           </div>
 
           <div className="muted" style={{ marginLeft: 'auto' }}>
             {latest?.latest ? (
               <>
-                1D: {fmtTs(latest.latest['1D']?.ts)} · 30m: {fmtTs(latest.latest['30m']?.ts)} · 60m:{' '}
+                1m: {fmtTs(latest.latest['1m']?.ts)} · 5m: {fmtTs(latest.latest['5m']?.ts)} · 15m: {fmtTs(latest.latest['15m']?.ts)} · 1D: {fmtTs(latest.latest['1D']?.ts)} · 30m: {fmtTs(latest.latest['30m']?.ts)} · 60m:{' '}
                 {fmtTs(latest.latest['60m']?.ts)} · 180m: {fmtTs(latest.latest['180m']?.ts)}
               </>
             ) : (
@@ -141,6 +234,10 @@ export default function App() {
             )}
           </div>
         </div>
+        <div className="muted" style={{ marginBottom: 8 }}>
+          다음 1분봉까지: <b>{minuteCountdown}s</b>
+        </div>
+        {notifyMsg ? <div className="muted" style={{ marginBottom: 8 }}>알림: {notifyMsg}</div> : null}
 
         <div className="grid2">
           <div className="card">
@@ -160,7 +257,32 @@ export default function App() {
               <PriceChart candles={candles} scenario={scenario} />
             </div>
             <div className="muted" style={{ marginTop: 10 }}>
-              차트 위 점선: Entry/Stop/TP1 · 가이드 라인: (현재가 → Entry → TP1) 시나리오
+              차트 위 점선: Entry/Stop/TP1/TP2 · 가이드 라인: (현재가 → Entry → TP1)
+            </div>
+
+            <div className="kpiGrid" style={{ marginTop: 12 }}>
+              <div className="kpi">
+                <div className="muted">상태</div>
+                <div className={`kpiValue ${selected?.status === 'ready' ? 'ok' : 'wait'}`}>
+                  {selected?.status?.toUpperCase?.() ?? '-'}
+                </div>
+              </div>
+              <div className="kpi">
+                <div className="muted">신뢰도</div>
+                <div className="kpiValue">
+                  {selected?.confidence !== undefined ? `${selected.confidence}` : '-'}
+                </div>
+              </div>
+              <div className="kpi">
+                <div className="muted">ATR%</div>
+                <div className="kpiValue">{fmtPct(selected?.atr_pct, 3)}</div>
+              </div>
+              <div className="kpi">
+                <div className="muted">다음 봉까지</div>
+                <div className="kpiValue">
+                  {selected?.time_to_next_sec !== undefined ? `${Math.round(selected.time_to_next_sec / 60)}m` : '-'}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -173,6 +295,13 @@ export default function App() {
                 '1D 레짐 데이터가 부족하면 추천이 보수적으로 바뀔 수 있습니다.'
               )}
             </div>
+            {notes.length > 0 ? (
+              <div className="notice" style={{ marginTop: 10 }}>
+                {notes.map((n, i) => (
+                  <div key={`${n}-${i}`}>• {n}</div>
+                ))}
+              </div>
+            ) : null}
 
             {err ? (
               <div className="muted" style={{ marginTop: 10 }}>
@@ -214,8 +343,18 @@ export default function App() {
                     </td>
                   </tr>
                   <tr>
+                    <th>TP2/TP3</th>
+                    <td>
+                      <b>{fmt(plan?.tp2_price)}</b> / <b>{fmt(plan?.tp3_price)}</b> <span className="muted">(RR 기반)</span>
+                    </td>
+                  </tr>
+                  <tr>
                     <th>손절폭</th>
                     <td>{plan?.stop_distance_pct ?? '-'}%</td>
+                  </tr>
+                  <tr>
+                    <th>진입 거리</th>
+                    <td>{plan?.entry_distance_pct ?? '-'}%</td>
                   </tr>
                   <tr>
                     <th>권장 최대 배율</th>
@@ -225,7 +364,14 @@ export default function App() {
                   </tr>
                   <tr>
                     <th>R:R(대략)</th>
-                    <td>{plan?.reward_risk_to_tp1 ?? '-'}</td>
+                    <td>
+                      {plan?.reward_risk_to_tp1 ?? '-'} <span className="muted">(TP1)</span>{' '}
+                      {plan?.reward_risk_to_tp2 !== undefined ? (
+                        <>
+                          · {plan.reward_risk_to_tp2} <span className="muted">(TP2)</span>
+                        </>
+                      ) : null}
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -233,6 +379,9 @@ export default function App() {
 
             <div className="muted" style={{ marginTop: 10 }}>
               청산 룰: {plan?.tp_rule ?? '-'}
+            </div>
+            <div className="muted" style={{ marginTop: 6 }}>
+              베스트 파라미터: {rec?.best_params?.entry_mode ?? '-'} / k={rec?.best_params?.entry_k ?? '-'} / stop={rec?.best_params?.stop_mult ?? '-'}
             </div>
           </div>
         </div>
@@ -249,10 +398,14 @@ export default function App() {
                 <tr>
                   <th>TF</th>
                   <th>Score</th>
+                  <th>Comp</th>
+                  <th>Conf</th>
+                  <th>BT</th>
                   <th>Signal</th>
                   <th>Close</th>
                   <th>SMA5</th>
                   <th>RSI2</th>
+                  <th>ATR%</th>
                   <th>Next</th>
                 </tr>
               </thead>
@@ -265,10 +418,21 @@ export default function App() {
                       <b>{c.tf}</b>
                     </td>
                     <td>{c.entry_ease_score}</td>
+                    <td>{c.composite_score ?? '-'}</td>
+                    <td>{c.confidence ?? '-'}</td>
+                    <td>
+                      <div className="barWrap">
+                        <div
+                          className="barFill"
+                          style={{ width: `${Math.round((Number(c.backtest_score_norm) || 0) * 100)}%` }}
+                        />
+                      </div>
+                    </td>
                     <td>{c.trigger_now ? 'READY' : 'WAIT'}</td>
                     <td>{fmt(c.close)}</td>
                     <td>{fmt(c.sma5)}</td>
                     <td>{Number(c.rsi2).toFixed(2)}</td>
+                    <td>{fmtPct(c.atr_pct, 3)}</td>
                     <td>{Math.round(Number(c.time_to_next_sec) / 60)}m</td>
                   </tr>
                 ))}

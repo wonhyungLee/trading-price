@@ -10,6 +10,16 @@ class WebhookPayload(BaseModel):
     exchange: Optional[str] = None
     timeframe: str
     ts: Optional[int] = Field(default=None, description="Unix timestamp seconds or milliseconds")
+    bar_close_confirmed: Optional[bool] = Field(
+        default=None,
+        description="Whether this candle is fully closed (recommended to send from TradingView)",
+    )
+    bar_close: Optional[bool] = Field(
+        default=None,
+        description="Alias for bar_close_confirmed (legacy clients)",
+    )
+    barstate: Optional[str] = Field(default=None, description="Optional bar state hint e.g. 'closed'")
+    is_bar_close: Optional[bool] = Field(default=None, description="Alias for bar_close_confirmed")
     
     # Support both string (ISO) and int/float (Timestamp) for time
     time: Optional[Union[int, float, str]] = Field(default=None)

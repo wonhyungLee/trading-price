@@ -2,6 +2,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
+import math
 
 from . import db
 from .indicators import sma_last, rsi_sma_last, atr_sma_last, clamp
@@ -9,7 +10,7 @@ from .evaluator import backtest_price_plan, score_metrics
 from .config import (
     LOOKBACK_1D, LOOKBACK_INTRA, MAX_LEVERAGE, RISK_PCT_DEFAULT, STOP_ATR_MULT,
     ENTRY_ATR_K_30, ENTRY_ATR_K_60, ENTRY_ATR_K_180,
-    EVAL_LOOKBACK_BARS, ENTRY_K_GRID, STOP_MULT_GRID,
+    EVAL_LOOKBACK_BARS, ENTRY_K_GRID, STOP_MULT_GRID, MIN_ATR_PCT, MAX_ATR_PCT,
 )
 
 _EVAL_CACHE: Dict[tuple, Dict[str, Any]] = {}
@@ -33,6 +34,12 @@ def tf_key(minutes_or_str: str) -> Optional[str]:
         return "180m"
     if s in ("1D", "D", "1DAY", "DAY"):
         return "1D"
+    if s in ("1", "1M", "1MIN", "1MINUTE"):
+        return "1m"
+    if s in ("5", "5M", "5MIN", "5MINUTE"):
+        return "5m"
+    if s in ("15", "15M", "15MIN", "15MINUTE"):
+        return "15m"
     return None
 
 def entry_k_for_tf(tf: str) -> float:
@@ -130,6 +137,8 @@ def evaluate_timeframe(tf: str, side: str, regime_bias: str) -> Optional[Dict[st
     close = float(last["close"])
     ts = int(last["ts"])
     score, detail = _ease_score(side, close, float(sma5), float(sma200), float(rsi2), regime_bias)
+    atr_pct = (float(atr14) / close * 100.0) if close else 0.0
+    vol_ok = (atr_pct >= MIN_ATR_PCT) and (atr_pct <= MAX_ATR_PCT)
 
     now = int(time.time())
     tf_sec = TF_MINUTES[tf] * 60
@@ -144,10 +153,18 @@ def evaluate_timeframe(tf: str, side: str, regime_bias: str) -> Optional[Dict[st
         "sma200": float(sma200),
         "rsi2": float(rsi2),
         "atr14": float(atr14),
+        "atr_pct": round(atr_pct, 4),
+        "vol_ok": bool(vol_ok),
         "entry_ease_score": round(float(score), 2),
         "time_to_next_sec": int(time_to_next),
         **detail,
     }
+
+def _norm_backtest_score(x: float) -> float:
+    # Compress to 0..1 range for UI scoring.
+    if x is None or not math.isfinite(x):
+        return 0.5
+    return 0.5 + 0.5 * math.tanh(float(x) / 3.0)
 
 def _grid_from_cfg(s: str) -> List[float]:
     out: List[float] = []
@@ -228,6 +245,14 @@ def build_plan(candidate: Dict[str, Any], side: str, best_params: Optional[Dict[
     stop = entry - stop_mult * atr if side == 'long' else entry + stop_mult * atr
     # TP anchored to SMA5 mean reversion
     tp1 = float(candidate["sma5"])
+    # Optional RR-based targets for swing/runner management
+    risk_unit = abs(entry - stop)
+    if side == "long":
+        tp2 = entry + risk_unit * 1.5
+        tp3 = entry + risk_unit * 2.5
+    else:
+        tp2 = entry - risk_unit * 1.5
+        tp3 = entry - risk_unit * 2.5
 
     stop_dist = abs(entry - stop)
     stop_pct = stop_dist / entry * 100.0 if entry != 0 else 0.0
@@ -236,13 +261,17 @@ def build_plan(candidate: Dict[str, Any], side: str, best_params: Optional[Dict[
     max_lev = round(max_lev, 2)
 
     rr = None
+    rr2 = None
     if side == "long":
         if entry > stop:
             rr = (tp1 - entry) / (entry - stop)
+            rr2 = (tp2 - entry) / (entry - stop)
     else:
         if stop > entry:
             rr = (entry - tp1) / (stop - entry)
+            rr2 = (entry - tp2) / (stop - entry)
     rr = float(rr) if rr is not None else None
+    rr2 = float(rr2) if rr2 is not None else None
 
     return {
         "side": side,
@@ -251,11 +280,15 @@ def build_plan(candidate: Dict[str, Any], side: str, best_params: Optional[Dict[
         "entry_price": round(entry, 2),
         "stop_price": round(stop, 2),
         "tp1_price": round(tp1, 2),
+        "tp2_price": round(tp2, 2),
+        "tp3_price": round(tp3, 2),
         "tp_rule": "exit when close crosses SMA5, then exit next bar open",
         "risk_pct": risk_pct,
         "stop_distance_pct": round(stop_pct, 3),
+        "entry_distance_pct": round(abs(entry - price) / price * 100.0, 3) if price else None,
         "max_leverage_by_risk": max_lev,
         "reward_risk_to_tp1": round(rr, 3) if rr is not None else None,
+        "reward_risk_to_tp2": round(rr2, 3) if rr2 is not None else None,
         "params": {"entry_atr_k": k, "stop_atr_mult": stop_mult},
         "recent_metrics": best_params.get('metrics') if (best_params and best_params.get('ok')) else None,
     }
@@ -282,33 +315,62 @@ def recommend(side: str, risk_pct: Optional[float]=None) -> Dict[str, Any]:
             "candidates": [],
         }
 
-    # 1) entry-ease: what's easiest to enter *now* (trigger proximity)
+    # Score each candidate with composite score
+    scored: List[Dict[str, Any]] = []
+    for c in candidates:
+        p = _best_params_for_tf(c["tf"], side)
+        eval_score = float(p.get("score", 0.0)) if p.get("ok") else None
+        bt_norm = _norm_backtest_score(eval_score if eval_score is not None else 0.0)
+
+        reg_conf = float(reg.get("confidence", 0.0) or 0.0)
+        regime_bonus = 0.0
+        if regime_bias == "long_favored" and side == "long":
+            regime_bonus = 1.0
+        elif regime_bias == "short_favored" and side == "short":
+            regime_bonus = 1.0
+        elif regime_bias in ("long_favored", "short_favored"):
+            regime_bonus = -0.5
+
+        vol_penalty = -12.0 if not c.get("vol_ok", True) else 0.0
+        trigger_bonus = 6.0 if c.get("trigger_now") else 0.0
+        trend_bonus = 4.0 if c.get("trend_ok") else -4.0
+
+        composite = (
+            float(c["entry_ease_score"])
+            + (bt_norm * 20.0)
+            + (reg_conf * 10.0)
+            + (regime_bonus * 6.0)
+            + trigger_bonus
+            + trend_bonus
+            + vol_penalty
+        )
+
+        confidence = clamp(
+            (float(c["entry_ease_score"]) / 110.0) * 0.5
+            + bt_norm * 0.3
+            + reg_conf * 0.2
+            + (0.05 if c.get("vol_ok") else -0.1),
+            0.0,
+            1.0,
+        )
+
+        c = dict(c)
+        c["backtest_score"] = round(float(eval_score), 4) if eval_score is not None else None
+        c["backtest_score_norm"] = round(bt_norm, 4)
+        c["composite_score"] = round(float(composite), 2)
+        c["confidence"] = round(confidence * 100.0, 1)
+        c["status"] = "ready" if (c.get("trigger_now") and c.get("trend_ok") and c.get("vol_ok")) else "wait"
+        c["best_params"] = p if p.get("ok") else None
+        scored.append(c)
+
     candidates_sorted = sorted(
-        candidates,
-        key=lambda x: (x["entry_ease_score"], x["trigger_now"], -x["time_to_next_sec"]),
+        scored,
+        key=lambda x: (x["composite_score"], x["entry_ease_score"], x["trigger_now"], -x["time_to_next_sec"]),
         reverse=True
     )
 
-    # 2) finalists: within 5 points of the best entry-ease
-    top_ease = float(candidates_sorted[0]["entry_ease_score"])
-    finalists = [c for c in candidates_sorted if (top_ease - float(c["entry_ease_score"])) <= 5.0]
-    if not finalists:
-        finalists = candidates_sorted[:1]
-
-    # 3) tie-break by recent backtest score (win/return/MDD aware)
-    best_final: Optional[Dict[str, Any]] = None
-    best_params_map: Optional[Dict[str, Any]] = None
-    best_eval_score = -1e18
-
-    for c in finalists:
-        p = _best_params_for_tf(c["tf"], side)
-        eval_score = float(p.get("score", -1e18)) if p.get("ok") else -1e18
-        if eval_score > best_eval_score:
-            best_eval_score = eval_score
-            best_final = c
-            best_params_map = p
-
-    chosen = best_final or candidates_sorted[0]
+    chosen = candidates_sorted[0]
+    best_params_map = chosen.get("best_params") or None
     plan = build_plan(chosen, side, best_params=best_params_map, risk_pct=risk_pct)
 
     # Provide chart-overlay hints for the UI.
@@ -332,8 +394,17 @@ def recommend(side: str, risk_pct: Optional[float]=None) -> Dict[str, Any]:
             "entry": float(plan.get("entry_price")),
             "stop": float(plan.get("stop_price")),
             "tp1": float(plan.get("tp1_price")),
+            "tp2": float(plan.get("tp2_price")),
         },
     }
+
+    notes: List[str] = []
+    if reg.get("bias") == "unknown":
+        notes.append("1D 레짐 불확실 (데이터 부족)")
+    if not chosen.get("vol_ok", True):
+        notes.append(f"변동성(ATR%) 범위 이탈: {chosen.get('atr_pct')}%")
+    if chosen.get("status") != "ready":
+        notes.append("진입 조건 미충족(대기)")
 
     return {
         "ok": True,
@@ -342,4 +413,5 @@ def recommend(side: str, risk_pct: Optional[float]=None) -> Dict[str, Any]:
         "best_params": best_params_map,
         "plan": plan,
         "candidates": candidates_sorted,
+        "notes": notes,
     }

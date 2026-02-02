@@ -5,12 +5,13 @@ export type Candle = {
   low: number;
   close: number;
   volume: number | null;
+  is_partial?: boolean;
 };
 
 export type Scenario = {
   tf_sec: number;
   path: { ts: number; value: number }[];
-  levels: { entry: number; stop: number; tp1: number };
+  levels: { entry: number; stop: number; tp1: number; tp2?: number };
 };
 
 export type RecommendResponse = {
@@ -49,7 +50,25 @@ export async function fetchRecommend(side: 'long' | 'short', riskPct?: number): 
   return getJson(`/api/recommend?${q.toString()}`);
 }
 
+export async function notifyRecommend(
+  side: 'long' | 'short',
+  riskPct?: number,
+): Promise<{ ok: boolean; detail?: string; recommend?: RecommendResponse }> {
+  const q = new URLSearchParams({ side });
+  if (riskPct !== undefined && Number.isFinite(riskPct)) q.set('risk_pct', String(riskPct));
+  const res = await fetch(`${API_BASE}/api/notify/recommend?${q.toString()}`, { method: 'POST' });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return (await res.json()) as { ok: boolean; detail?: string; recommend?: RecommendResponse };
+}
+
 export async function fetchCandles(tf: string, limit = 200): Promise<{ ok: boolean; timeframe: string; candles: Candle[] }> {
   const q = new URLSearchParams({ tf, limit: String(limit) });
-  return getJson(`/api/candles?${q.toString()}`);
+  const res = await getJson<any>(`/api/candles?${q.toString()}`);
+  return {
+    ok: res.ok,
+    timeframe: res.timeframe,
+    candles: res.data || [],
+  };
 }

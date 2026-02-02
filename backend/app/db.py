@@ -74,6 +74,17 @@ def fetch_latest(timeframe: str) -> Optional[sqlite3.Row]:
     finally:
         conn.close()
 
+def fetch_range(timeframe: str, start_ts: int, end_ts: int) -> List[sqlite3.Row]:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            """SELECT * FROM candles WHERE timeframe=? AND ts BETWEEN ? AND ? ORDER BY ts ASC""",
+            (timeframe, start_ts, end_ts),
+        )
+        return cur.fetchall()
+    finally:
+        conn.close()
+
 def timeframes_available() -> List[str]:
     conn = connect()
     try:

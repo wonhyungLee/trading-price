@@ -22,8 +22,10 @@ export default function PriceChart({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<'Bar'> | null>(null);
   const pathSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const sma5SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const sma200SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const priceLineCleanupRef = useRef<(() => void) | null>(null);
 
   const candleData = useMemo(
@@ -37,6 +39,21 @@ export default function PriceChart({
       })),
     [candles],
   );
+
+  const closeSeries = useMemo(() => candles.map((c) => c.close), [candles]);
+  const timeSeries = useMemo(() => candles.map((c) => toTs(c.ts)), [candles]);
+
+  function sma(values: number[], period: number): Array<number | null> {
+    if (values.length < period) return values.map(() => null);
+    const out: Array<number | null> = Array(values.length).fill(null);
+    let sum = 0;
+    for (let i = 0; i < values.length; i++) {
+      sum += values[i];
+      if (i >= period) sum -= values[i - period];
+      if (i >= period - 1) out[i] = sum / period;
+    }
+    return out;
+  }
 
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return;
@@ -67,20 +84,30 @@ export default function PriceChart({
       height: el.clientHeight,
     });
 
-    const candleSeries = chart.addCandlestickSeries({
-      // keep defaults; only set subtle borders so it reads on dark background
-      borderVisible: false,
-      wickVisible: true,
+    const candleSeries = chart.addBarSeries({
+      upColor: '#26a69a',
+      downColor: '#ef5350',
     });
 
     const pathSeries = chart.addLineSeries({
       lineWidth: 2,
       lineStyle: LineStyle.Dashed,
     });
+    const sma5Series = chart.addLineSeries({
+      color: '#3f6bf6',
+      lineWidth: 1,
+    });
+    const sma200Series = chart.addLineSeries({
+      color: '#8a93a9',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dotted,
+    });
 
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     pathSeriesRef.current = pathSeries;
+    sma5SeriesRef.current = sma5Series;
+    sma200SeriesRef.current = sma200Series;
 
     // ResizeObserver for responsive layout
     const ro = new ResizeObserver(() => {
@@ -98,6 +125,8 @@ export default function PriceChart({
       chartRef.current = null;
       candleSeriesRef.current = null;
       pathSeriesRef.current = null;
+      sma5SeriesRef.current = null;
+      sma200SeriesRef.current = null;
     };
   }, []);
 
@@ -106,8 +135,24 @@ export default function PriceChart({
     const chart = chartRef.current;
     if (!candleSeries || !chart) return;
     candleSeries.setData(candleData);
+    const sma5Series = sma5SeriesRef.current;
+    const sma200Series = sma200SeriesRef.current;
+    if (sma5Series && sma200Series) {
+      const sma5 = sma(closeSeries, 5);
+      const sma200 = sma(closeSeries, 200);
+      sma5Series.setData(
+        sma5
+          .map((v, i) => (v === null ? null : { time: timeSeries[i], value: v }))
+          .filter((v): v is { time: UTCTimestamp; value: number } => v !== null),
+      );
+      sma200Series.setData(
+        sma200
+          .map((v, i) => (v === null ? null : { time: timeSeries[i], value: v }))
+          .filter((v): v is { time: UTCTimestamp; value: number } => v !== null),
+      );
+    }
     chart.timeScale().fitContent();
-  }, [candleData]);
+  }, [candleData, closeSeries, timeSeries]);
 
   useEffect(() => {
     // Clean old price lines
@@ -136,6 +181,7 @@ export default function PriceChart({
       { price: scenario.levels.entry, title: 'Entry' },
       { price: scenario.levels.stop, title: 'Stop' },
       { price: scenario.levels.tp1, title: 'TP1' },
+      ...(scenario.levels.tp2 ? [{ price: scenario.levels.tp2, title: 'TP2' }] : []),
     ].map((x) => candleSeries.createPriceLine({
       price: x.price,
       lineWidth: 1,

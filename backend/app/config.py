@@ -24,6 +24,8 @@ def env_str(key: str, default: str) -> str:
 
 DB_PATH = env_str("WONYODD_DB_PATH", "./data/wonyodd.sqlite3")
 WEBHOOK_SECRET = env_str("WONYODD_WEBHOOK_SECRET", "")
+DISCORD_WEBHOOK_URL = env_str("WONYODD_DISCORD_WEBHOOK_URL", "")
+DISCORD_WEBHOOK_FILE = env_str("WONYODD_DISCORD_WEBHOOK_FILE", "개인정보.txt")
 MAX_LEVERAGE = env_float("WONYODD_MAX_LEVERAGE", 10.0)
 RISK_PCT_DEFAULT = env_float("WONYODD_RISK_PCT_DEFAULT", 0.5)  # % of equity per trade
 STOP_ATR_MULT = env_float("WONYODD_STOP_ATR_MULT", 1.5)
@@ -43,8 +45,16 @@ LOOKBACK_INTRA = int(env_float("WONYODD_LOOKBACK_INTRA", 260))
 REQUIRE_BAR_CLOSE = env_bool("WONYODD_REQUIRE_BAR_CLOSE", False)
 VALIDATE_TS_ALIGNMENT = env_bool("WONYODD_VALIDATE_TS_ALIGNMENT", False)
 
+# Low timeframe ingestion / resampling
+RESAMPLE_FROM_LOWER_TF = env_bool("WONYODD_RESAMPLE_FROM_LOWER_TF", True)
+INCLUDE_PARTIAL_BARS = env_bool("WONYODD_INCLUDE_PARTIAL_BARS", True)
+
 # Evaluator / scoring (recent backtest window)
 EVAL_LOOKBACK_BARS = int(env_float("WONYODD_EVAL_LOOKBACK_BARS", 2000))
+
+# Volatility filters (ATR% bounds)
+MIN_ATR_PCT = env_float("WONYODD_MIN_ATR_PCT", 0.15)
+MAX_ATR_PCT = env_float("WONYODD_MAX_ATR_PCT", 4.0)
 
 # Parameter grid (comma-separated)
 ENTRY_K_GRID = env_str("WONYODD_ENTRY_K_GRID", "0.0,0.25,0.5,0.75,1.0")

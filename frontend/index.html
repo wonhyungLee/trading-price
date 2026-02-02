@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Wonyodd Reco Engine</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:#0b0f19; color:#e7e9ee;}
+    header { padding: 16px 20px; border-bottom: 1px solid #24304f; background:#0b0f19; position: sticky; top:0;}
+    .wrap { max-width: 1050px; margin: 0 auto; padding: 18px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #2b3b63; background:#141c2f; color:#e7e9ee; cursor:pointer; }
+    button:hover { background:#1b2642;}
+    .card { background:#10182b; border:1px solid #24304f; border-radius: 16px; padding: 14px; flex:1; min-width: 290px;}
+    .muted { color:#aab2c5; font-size: 13px; }
+    .big { font-size: 20px; font-weight: 650; }
+    code { background:#0b0f19; padding:2px 6px; border-radius: 8px; border:1px solid #24304f;}
+    table { width:100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #24304f; padding: 8px; text-align: left; }
+    .pill { display:inline-block; padding:2px 8px; border:1px solid #2b3b63; border-radius:999px; font-size:12px; color:#cfd6e6; margin-left:6px;}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <div class="big">진입 가격 추천 (30m / 60m / 180m 자동 선택)</div>
+      <div class="muted">트레이더는 LONG/SHORT만 선택 → 시스템이 1D 레짐 + 진입 용이성 점수로 TF 선택 후 Entry/Stop/TP/Leverage를 제안합니다.</div>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="row" style="margin-bottom:12px;">
+      <button onclick="run('long')">LONG 추천</button>
+      <button onclick="run('short')">SHORT 추천</button>
+      <button onclick="refreshLatest()">데이터 상태</button>
+      <span class="muted" id="status" style="align-self:center;"></span>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <div class="big">추천 플랜</div>
+        <div class="muted" id="regime"></div>
+        <div style="margin-top:12px;" id="plan"></div>
+      </div>
+      <div class="card">
+        <div class="big">TF 후보 점수</div>
+        <div class="muted">entry_ease_score가 가장 높은 TF 1개를 선택합니다.</div>
+        <div style="margin-top:12px;" id="cands"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px;">
+      <div class="big">TradingView 웹훅 예시</div>
+      <div class="muted">Alert message에 아래 JSON을 넣고, Webhook URL을 <code>/api/webhook/tradingview</code>로 설정하세요.</div>
+      <pre id="tv" style="white-space:pre-wrap; margin-top:10px; background:#0b0f19; border:1px solid #24304f; border-radius:16px; padding:12px; overflow:auto;"></pre>
+    </div>
+  </div>
+
+<script>
+const tvExample = {
+  password: "YOUR_SECRET_OPTIONAL",
+  exchange: "{{exchange}}",
+  symbol: "{{ticker}}",
+  timeframe: "{{interval}}",
+  time: "{{time}}",
+  open: "{{open}}",
+  high: "{{high}}",
+  low: "{{low}}",
+  close: "{{close}}",
+  volume: "{{volume}}",
+  features: {
+    // optional: include any indicators you want, e.g. RSI, MACD
+    // rsi14: "{{rsi}}"
+  }
+};
+
+document.getElementById("tv").textContent = JSON.stringify(tvExample, null, 2);
+
+async function run(side){
+  const res = await fetch(`/api/recommend?side=${side}`);
+  const data = await res.json();
+  if(!data.ok){
+    document.getElementById("plan").innerHTML = `<div class="muted">오류: ${data.error || 'unknown'}</div>`;
+    document.getElementById("cands").innerHTML = "";
+    return;
+  }
+
+  const r = data.regime;
+  const bias = r.bias || "unknown";
+  document.getElementById("regime").innerHTML =
+    `1D 레짐: <b>${bias}</b> <span class="pill">conf ${r.confidence ?? ''}</span>
+     <div class="muted">1D close=${fmt(r.last_close)} / SMA200=${fmt(r.sma200)}</div>`;
+
+  const p = data.plan;
+  document.getElementById("plan").innerHTML = `
+    <div>선택 TF: <b>${p.tf}</b> / 방향: <b>${p.side.toUpperCase()}</b></div>
+    <div style="margin-top:10px;">
+      <table>
+        <tr><th>항목</th><th>값</th></tr>
+        <tr><td>추천 진입가</td><td><b>${fmt(p.entry_price)}</b> <span class="muted">(ATR 기반 지정가)</span></td></tr>
+        <tr><td>추천 손절가</td><td><b>${fmt(p.stop_price)}</b> <span class="muted">(ATR×${p.params.stop_atr_mult})</span></td></tr>
+        <tr><td>추천 TP1</td><td><b>${fmt(p.tp1_price)}</b> <span class="muted">(SMA5 회복)</span></td></tr>
+        <tr><td>청산 룰</td><td>${p.tp_rule}</td></tr>
+        <tr><td>손절폭</td><td>${p.stop_distance_pct}%</td></tr>
+        <tr><td>권장 최대 배율</td><td><b>${p.max_leverage_by_risk}x</b> <span class="muted">(리스크 ${p.risk_pct}% 기준)</span></td></tr>
+        <tr><td>R:R(대략)</td><td>${p.reward_risk_to_tp1 ?? '-'}</td></tr>
+      </table>
+    </div>
+  `;
+
+  const rows = data.candidates.map(c => `
+    <tr>
+      <td><b>${c.tf}</b></td>
+      <td>${c.entry_ease_score}</td>
+      <td>${c.trigger_now ? 'READY' : 'WAIT'}</td>
+      <td>${fmt(c.close)}</td>
+      <td>${fmt(c.sma5)}</td>
+      <td>${c.rsi2.toFixed(2)}</td>
+      <td>${Math.round(c.time_to_next_sec/60)}m</td>
+    </tr>`).join("");
+
+  document.getElementById("cands").innerHTML = `
+    <table>
+      <tr><th>TF</th><th>Score</th><th>Signal</th><th>Close</th><th>SMA5</th><th>RSI2</th><th>Next</th></tr>
+      ${rows}
+    </table>`;
+}
+
+async function refreshLatest(){
+  const res = await fetch("/api/latest");
+  const data = await res.json();
+  const l = data.latest || {};
+  document.getElementById("status").textContent =
+    `1D:${l["1D"]?new Date(l["1D"].ts*1000).toLocaleString():'-'} / 30m:${l["30m"]?new Date(l["30m"].ts*1000).toLocaleString():'-'} / 60m:${l["60m"]?new Date(l["60m"].ts*1000).toLocaleString():'-'} / 180m:${l["180m"]?new Date(l["180m"].ts*1000).toLocaleString():'-'}`;
+}
+
+function fmt(x){
+  if(x === null || x === undefined) return "-";
+  const n = Number(x);
+  if(!isFinite(n)) return "-";
+  return n.toLocaleString(undefined, {maximumFractionDigits: 2});
+}
+</script>
+</body>
+</html>

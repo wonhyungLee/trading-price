@@ -311,6 +311,30 @@ def recommend(side: str, risk_pct: Optional[float]=None) -> Dict[str, Any]:
     chosen = best_final or candidates_sorted[0]
     plan = build_plan(chosen, side, best_params=best_params_map, risk_pct=risk_pct)
 
+    # Provide chart-overlay hints for the UI.
+    # The UI fetches the full candles separately via /api/candles?tf=...
+    tf_sec = int(TF_MINUTES.get(plan["tf"], 60) * 60)
+    last_ts = int(chosen.get("ts", int(time.time())))
+    last_close = float(chosen.get("close", plan.get("entry_price", 0.0)))
+    entry_v = float(plan.get("entry_price"))
+    tp_v = float(plan.get("tp1_price"))
+
+    # A simple 3-point guide line: last_close -> entry (next bar) -> tp (few bars ahead)
+    scenario_points = [
+        {"ts": last_ts, "value": round(last_close, 2)},
+        {"ts": last_ts + tf_sec, "value": round(entry_v, 2)},
+        {"ts": last_ts + tf_sec * 5, "value": round(tp_v, 2)},
+    ]
+    plan["scenario"] = {
+        "tf_sec": tf_sec,
+        "path": scenario_points,
+        "levels": {
+            "entry": float(plan.get("entry_price")),
+            "stop": float(plan.get("stop_price")),
+            "tp1": float(plan.get("tp1_price")),
+        },
+    }
+
     return {
         "ok": True,
         "regime": reg,

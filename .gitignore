@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+frontend-react/node_modules/
+frontend-react/dist/
+data/
+*.patch

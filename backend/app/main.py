@@ -132,5 +132,39 @@ def latest():
         out[tf] = {"ts": int(row["ts"]), "close": float(row["close"])} if row else None
     return {"ok": True, "latest": out}
 
+
+@app.get("/api/candles")
+def candles(tf: str, limit: int = 200):
+    """Return recent candles for charting.
+
+    This is intentionally simple: the UI can request the selected timeframe and
+    draw candles + overlays (entry/stop/tp) without embedding large series into
+    /api/recommend.
+    """
+    tf_norm = tf_key(tf) or str(tf).strip()
+    if tf_norm not in ("1D", "30m", "60m", "180m"):
+        raise HTTPException(status_code=400, detail="unsupported timeframe; use 30,60,180,1D")
+
+    # clamp to prevent abuse
+    try:
+        limit_i = int(limit)
+    except Exception:
+        limit_i = 200
+    limit_i = max(50, min(2000, limit_i))
+
+    rows = db.fetch_recent(tf_norm, limit_i)
+    candles = [
+        {
+            "ts": int(r["ts"]),
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+            "volume": float(r["volume"]) if r["volume"] is not None else None,
+        }
+        for r in rows
+    ]
+    return {"ok": True, "timeframe": tf_norm, "candles": candles}
+
 # Serve frontend (static) AFTER API routes so /api/* wins.
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

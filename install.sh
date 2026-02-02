@@ -12,6 +12,9 @@ sudo chown -R "$USER_NAME":"$USER_NAME" "$APP_DIR"
 echo "[2/7] Copy files"
 rsync -a --delete backend/ "$APP_DIR/backend/"
 rsync -a --delete frontend/ "$APP_DIR/frontend/"
+if [ -d "frontend-react" ]; then
+  rsync -a --delete frontend-react/ "$APP_DIR/frontend-react/"
+fi
 rsync -a README.md "$APP_DIR/README.md"
 
 echo "[3/7] Create data dir"
@@ -67,6 +70,22 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable wonyodd-reco
 sudo systemctl restart wonyodd-reco
+
+echo "[Optional] Build React UI (if Node.js is available)"
+if [ -d "$APP_DIR/frontend-react" ] && command -v npm >/dev/null 2>&1; then
+  pushd "$APP_DIR/frontend-react" >/dev/null
+  if [ -f package-lock.json ]; then
+    npm ci
+  else
+    npm install
+  fi
+  npm run build
+  rsync -a --delete dist/ "$APP_DIR/frontend/"
+  popd >/dev/null
+  echo "React build deployed to $APP_DIR/frontend (served by FastAPI)."
+else
+  echo "Node.js/npm not found (or frontend-react missing). Keeping static frontend/ as-is."
+fi
 
 echo "[7/7] Done"
 echo "Open: http://<server-ip>:$PORT/"

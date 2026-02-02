@@ -1,6 +1,14 @@
 from __future__ import annotations
 import os
 
+
+def env_bool(key: str, default: bool) -> bool:
+    v = os.getenv(key)
+    if v is None or v == "":
+        return default
+    v = str(v).strip().lower()
+    return v in ("1","true","yes","y","on")
+
 def env_float(key: str, default: float) -> float:
     v = os.getenv(key)
     if v is None or v == "":
@@ -29,3 +37,15 @@ ENTRY_ATR_K_180 = env_float("WONYODD_ENTRY_ATR_K_180", 0.6)
 # how many candles to keep in memory calculations
 LOOKBACK_1D = int(env_float("WONYODD_LOOKBACK_1D", 260))
 LOOKBACK_INTRA = int(env_float("WONYODD_LOOKBACK_INTRA", 260))
+
+
+# Webhook ingestion guards
+REQUIRE_BAR_CLOSE = env_bool("WONYODD_REQUIRE_BAR_CLOSE", False)
+VALIDATE_TS_ALIGNMENT = env_bool("WONYODD_VALIDATE_TS_ALIGNMENT", False)
+
+# Evaluator / scoring (recent backtest window)
+EVAL_LOOKBACK_BARS = int(env_float("WONYODD_EVAL_LOOKBACK_BARS", 2000))
+
+# Parameter grid (comma-separated)
+ENTRY_K_GRID = env_str("WONYODD_ENTRY_K_GRID", "0.0,0.25,0.5,0.75,1.0")
+STOP_MULT_GRID = env_str("WONYODD_STOP_MULT_GRID", "1.0,1.25,1.5,1.75,2.0")

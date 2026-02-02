@@ -20,6 +20,8 @@ class WebhookPayload(BaseModel):
     close: float
     volume: Optional[float] = None
     features: Optional[Dict[str, Any]] = None
+    bar_close: Optional[bool] = Field(default=None, description="True when the source bar is closed")
+    tickerid: Optional[str] = None
 
 class RecommendQuery(BaseModel):
     side: str = Field(description="long or short")

@@ -1,0 +1,64 @@
+//@version=5
+indicator("Wonyodd Reco Engine - MTF Webhook Sender", overlay=false, max_labels_count=500)
+
+// ===============================
+// Inputs
+// ===============================
+secret      = input.string("", "Webhook Secret (password)", tooltip="Same as WONYODD_WEBHOOK_SECRET on your server")
+send_30m    = input.bool(true,  "Send 30m bars")
+send_60m    = input.bool(true,  "Send 60m bars")
+send_180m   = input.bool(true,  "Send 180m (3H) bars")
+send_1D     = input.bool(true,  "Send 1D bars (for regime filter)")
+
+// IMPORTANT:
+// - Use this indicator on a 1m chart (recommended).
+// - Create an alert with condition: 'Any alert() function call'.
+// - Set the webhook URL: http://<server-ip>:8010/api/webhook/tradingview
+
+// ===============================
+// Helpers
+// ===============================
+f_json(_tf, _t, _o, _h, _l, _c, _v) =>
+    // TradingView 'time' is in milliseconds
+    // Backend will convert ms->sec automatically
+    "{" +
+      ""password":"" + secret + ""," +
+      ""exchange":"" + syminfo.prefix + ""," +
+      ""symbol":"" + syminfo.ticker + ""," +
+      ""tickerid":"" + syminfo.tickerid + ""," +
+      ""timeframe":"" + _tf + ""," +
+      ""time":" + str.tostring(_t) + "," +
+      ""open":" + str.tostring(_o) + "," +
+      ""high":" + str.tostring(_h) + "," +
+      ""low":" + str.tostring(_l) + "," +
+      ""close":" + str.tostring(_c) + "," +
+      ""volume":" + str.tostring(_v) + "," +
+      ""bar_close":true" +
+    "}"
+
+// Detect 'new bar started' in a higher timeframe while running on a lower timeframe.
+// When the HTF time changes, the previous HTF bar is confirmed/closed.
+f_send_on_close(_tf, enabled) =>
+    if enabled
+        t = request.security(syminfo.tickerid, _tf, time,  barmerge.gaps_off, barmerge.lookahead_off)
+        o = request.security(syminfo.tickerid, _tf, open,  barmerge.gaps_off, barmerge.lookahead_off)
+        h = request.security(syminfo.tickerid, _tf, high,  barmerge.gaps_off, barmerge.lookahead_off)
+        l = request.security(syminfo.tickerid, _tf, low,   barmerge.gaps_off, barmerge.lookahead_off)
+        c = request.security(syminfo.tickerid, _tf, close, barmerge.gaps_off, barmerge.lookahead_off)
+        v = request.security(syminfo.tickerid, _tf, volume,barmerge.gaps_off, barmerge.lookahead_off)
+
+        is_new = ta.change(t)
+        if is_new
+            msg = f_json(_tf, t[1], o[1], h[1], l[1], c[1], v[1])
+            alert(msg, alert.freq_once_per_bar)
+
+// ===============================
+// Send webhooks on each TF bar close
+// ===============================
+f_send_on_close("30",  send_30m)
+f_send_on_close("60",  send_60m)
+f_send_on_close("180", send_180m)
+f_send_on_close("1D",  send_1D)
+
+// Tiny visual heartbeat
+plotchar(bar_index % 60 == 0, title="heartbeat", char="•", location=location.bottom)

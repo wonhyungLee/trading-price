@@ -1,5 +1,6 @@
 from __future__ import annotations
 import time
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -9,13 +10,13 @@ from fastapi.staticfiles import StaticFiles
 
 from dateutil import parser as dtparser
 
-from .config import WEBHOOK_SECRET
+from .config import WEBHOOK_SECRET, REQUIRE_BAR_CLOSE, VALIDATE_TS_ALIGNMENT
 from . import db
 from .models import WebhookPayload
 from .recommend import recommend, tf_key
 
 # Resolve project root (/opt/wonyodd-reco)
-PROJECT_ROOT = Path("/opt/wonyodd-reco")
+PROJECT_ROOT = Path(os.getenv("WONYODD_PROJECT_ROOT", "/opt/wonyodd-reco"))
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
 app = FastAPI(title="Wonyodd Reco Engine", version="1.0.0")
@@ -42,6 +43,27 @@ def _parse_ts(payload: WebhookPayload) -> int:
     if val > 10_000_000_000:
         val //= 1000
     return val
+
+def _validate_ts_alignment(tf: str, ts_sec: int) -> bool:
+    """Validate that ts is aligned to candle open time for timeframe.
+
+    This is a guard against accidental misuse of 'now' timestamps or mismatched timeframes.
+    Assumes UTC candle boundaries (standard for crypto).
+    """
+    if not VALIDATE_TS_ALIGNMENT:
+        return True
+    sec = None
+    if tf == "30m":
+        sec = 30 * 60
+    elif tf == "60m":
+        sec = 60 * 60
+    elif tf == "180m":
+        sec = 180 * 60
+    elif tf == "1D":
+        sec = 24 * 60 * 60
+    else:
+        return True
+    return (ts_sec % sec) == 0
 
 def _auth_ok(payload: WebhookPayload, header_secret: str) -> bool:
     if not WEBHOOK_SECRET:
@@ -71,6 +93,16 @@ async def tradingview_webhook(req: Request):
         raise HTTPException(status_code=400, detail="unsupported timeframe; use 30,60,180,1D")
 
     ts = _parse_ts(payload)
+
+
+    # Optional guard: only ingest when the source bar is closed.
+    # If bar_close is missing, we treat it as closed for backward compatibility.
+    if REQUIRE_BAR_CLOSE and payload.bar_close is False:
+        return {"ok": True, "skipped": True, "reason": "bar_not_closed", "timeframe": tf, "ts": ts}
+
+    # Optional guard: timestamp must align to the timeframe boundary.
+    if not _validate_ts_alignment(tf, ts):
+        raise HTTPException(status_code=400, detail="timestamp not aligned to timeframe boundary")
     db.upsert_candle(
         tf, ts,
         float(payload.open), float(payload.high), float(payload.low), float(payload.close),

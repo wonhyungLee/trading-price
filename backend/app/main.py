@@ -22,15 +22,26 @@ app = FastAPI(title="Wonyodd Reco Engine", version="1.0.0")
 db.init_db()
 
 def _parse_ts(payload: WebhookPayload) -> int:
+    # 1. ts field
     if payload.ts is not None:
-        ts = int(payload.ts)
-        if ts > 10_000_000_000:
-            ts //= 1000
-        return ts
-    if payload.time:
-        dt = dtparser.parse(payload.time)
-        return int(dt.timestamp())
-    return int(time.time())
+        val = int(payload.ts)
+    # 2. time field
+    elif payload.time is not None:
+        if isinstance(payload.time, (int, float)):
+            val = int(payload.time)
+        else:
+            try:
+                val = int(payload.time)
+            except ValueError:
+                dt = dtparser.parse(str(payload.time))
+                return int(dt.timestamp())
+    else:
+        return int(time.time())
+
+    # Milliseconds check (13 digits) -> Seconds (10 digits)
+    if val > 10_000_000_000:
+        val //= 1000
+    return val
 
 def _auth_ok(payload: WebhookPayload, header_secret: str) -> bool:
     if not WEBHOOK_SECRET:
@@ -48,6 +59,7 @@ async def tradingview_webhook(req: Request):
         data = await req.json()
         payload = WebhookPayload.model_validate(data)
     except Exception as e:
+        print(f"[DEBUG] Payload Error: {e}")
         raise HTTPException(status_code=400, detail=f"invalid payload: {e}")
 
     header_secret = req.headers.get("X-Webhook-Secret", "")

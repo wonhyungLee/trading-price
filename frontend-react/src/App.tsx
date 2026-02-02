@@ -27,13 +27,14 @@ export default function App() {
   const [rec, setRec] = useState<any>(null);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [scenario, setScenario] = useState<Scenario | null>(null);
+  const [chartTf, setChartTf] = useState<string>('30m');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
   const [serverOffsetMs, setServerOffsetMs] = useState<number>(0);
   const [minuteCountdown, setMinuteCountdown] = useState<number>(60);
 
-  const selectedTf = rec?.plan?.tf;
+  const selectedTf = rec?.plan?.tf ?? chartTf;
 
   async function refreshLatestUI() {
     try {
@@ -62,6 +63,7 @@ export default function App() {
       const tf = data.plan?.tf;
       const scen = data.plan?.scenario ?? null;
       setScenario(scen);
+      if (tf) setChartTf(tf);
 
       if (tf) {
         const c = await fetchCandles(tf, 5000);
@@ -96,8 +98,6 @@ export default function App() {
 
   useEffect(() => {
     refreshLatestUI();
-    // initial load
-    runRecommend('long');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -138,34 +138,40 @@ export default function App() {
   }, [serverOffsetMs]);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      refreshLatestUI();
-    }, 60_000);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    if (!selectedTf) return;
+    if (!chartTf) return;
     let cancelled = false;
+    let timer: number | undefined;
+
+    const msUntilNextMinute = (nowMs: number) => {
+      const next = Math.floor(nowMs / 60000) * 60000 + 60000;
+      return next - nowMs;
+    };
+
     const tick = async () => {
       try {
-        const c = await fetchCandles(selectedTf, 5000);
+        await refreshLatestUI();
+        const c = await fetchCandles(chartTf, 5000);
         if (!cancelled) setCandles(c.candles ?? []);
       } catch {
         // ignore
       }
+      if (cancelled) return;
+      const now = Date.now() + serverOffsetMs;
+      const delay = msUntilNextMinute(now) + 700;
+      timer = window.setTimeout(tick, delay);
     };
+
     tick();
-    const id = setInterval(tick, 30_000);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (timer) window.clearTimeout(timer);
     };
-  }, [selectedTf]);
+  }, [chartTf, serverOffsetMs]);
 
   const regime = rec?.regime;
   const plan = rec?.plan;
   const selected = rec?.selected;
+  const hasPlan = Boolean(plan?.entry_price);
   const notes: string[] = Array.isArray(rec?.notes) ? rec.notes : [];
   const candidates = useMemo(() => (Array.isArray(rec?.candidates) ? rec.candidates : []), [rec]);
 
@@ -254,10 +260,12 @@ export default function App() {
             </div>
 
             <div className="chartBox" style={{ marginTop: 10 }}>
-              <PriceChart candles={candles} scenario={scenario} />
+              <PriceChart candles={candles} scenario={hasPlan ? scenario : null} />
             </div>
             <div className="muted" style={{ marginTop: 10 }}>
-              차트 위 점선: Entry/Stop/TP1/TP2 · 가이드 라인: (현재가 → Entry → TP1)
+              {hasPlan
+                ? '차트 위 점선: Entry/Stop/TP1/TP2 · 가이드 라인: (현재가 → Entry → TP1)'
+                : '추천 전: 현재 가격만 표시됩니다.'}
             </div>
 
             <div className="kpiGrid" style={{ marginTop: 12 }}>
@@ -309,137 +317,149 @@ export default function App() {
               </div>
             ) : null}
 
-            <div style={{ marginTop: 10 }}>
+            {hasPlan ? (
+              <div style={{ marginTop: 10 }}>
+                <table>
+                  <tbody>
+                    <tr>
+                      <th>방향</th>
+                      <td>
+                        <b>{plan?.side?.toUpperCase?.() ?? '-'}</b>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>TF</th>
+                      <td>
+                        <b>{plan?.tf ?? '-'}</b>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>Entry</th>
+                      <td>
+                        <b>{fmt(plan?.entry_price)}</b> <span className="muted">({plan?.entry_type})</span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>Stop</th>
+                      <td>
+                        <b>{fmt(plan?.stop_price)}</b> <span className="muted">(ATR×{plan?.params?.stop_atr_mult})</span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>TP1</th>
+                      <td>
+                        <b>{fmt(plan?.tp1_price)}</b> <span className="muted">(SMA5 회복)</span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>TP2/TP3</th>
+                      <td>
+                        <b>{fmt(plan?.tp2_price)}</b> / <b>{fmt(plan?.tp3_price)}</b> <span className="muted">(RR 기반)</span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>손절폭</th>
+                      <td>{plan?.stop_distance_pct ?? '-'}%</td>
+                    </tr>
+                    <tr>
+                      <th>진입 거리</th>
+                      <td>{plan?.entry_distance_pct ?? '-'}%</td>
+                    </tr>
+                    <tr>
+                      <th>권장 최대 배율</th>
+                      <td>
+                        <b>{plan?.max_leverage_by_risk ?? '-'}</b>x <span className="muted">(리스크 {plan?.risk_pct ?? '-'}%)</span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>R:R(대략)</th>
+                      <td>
+                        {plan?.reward_risk_to_tp1 ?? '-'} <span className="muted">(TP1)</span>{' '}
+                        {plan?.reward_risk_to_tp2 !== undefined ? (
+                          <>
+                            · {plan.reward_risk_to_tp2} <span className="muted">(TP2)</span>
+                          </>
+                        ) : null}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="muted" style={{ marginTop: 10 }}>
+                LONG/SHORT 버튼을 누르면 Entry/Stop/TP가 표시됩니다.
+              </div>
+            )}
+
+            {hasPlan ? (
+              <>
+                <div className="muted" style={{ marginTop: 10 }}>
+                  청산 룰: {plan?.tp_rule ?? '-'}
+                </div>
+                <div className="muted" style={{ marginTop: 6 }}>
+                  베스트 파라미터: {rec?.best_params?.entry_mode ?? '-'} / k={rec?.best_params?.entry_k ?? '-'} / stop={rec?.best_params?.stop_mult ?? '-'}
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+
+        {hasPlan ? (
+          <div className="card" style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 16, fontWeight: 650 }}>TF 후보 점수</div>
+            <div className="muted" style={{ marginTop: 6 }}>
+              entry_ease_score가 높은 TF가 우선이며, 상위 후보는 최근 백테스트 점수(수익/MDD 균형)로 2차 선별합니다.
+            </div>
+
+            <div style={{ marginTop: 10, overflow: 'auto' }}>
               <table>
-                <tbody>
-                  <tr>
-                    <th>방향</th>
-                    <td>
-                      <b>{plan?.side?.toUpperCase?.() ?? '-'}</b>
-                    </td>
-                  </tr>
+                <thead>
                   <tr>
                     <th>TF</th>
-                    <td>
-                      <b>{plan?.tf ?? '-'}</b>
-                    </td>
+                    <th>Score</th>
+                    <th>Comp</th>
+                    <th>Conf</th>
+                    <th>BT</th>
+                    <th>Signal</th>
+                    <th>Close</th>
+                    <th>SMA5</th>
+                    <th>RSI2</th>
+                    <th>ATR%</th>
+                    <th>Next</th>
                   </tr>
-                  <tr>
-                    <th>Entry</th>
-                    <td>
-                      <b>{fmt(plan?.entry_price)}</b> <span className="muted">({plan?.entry_type})</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <th>Stop</th>
-                    <td>
-                      <b>{fmt(plan?.stop_price)}</b> <span className="muted">(ATR×{plan?.params?.stop_atr_mult})</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <th>TP1</th>
-                    <td>
-                      <b>{fmt(plan?.tp1_price)}</b> <span className="muted">(SMA5 회복)</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <th>TP2/TP3</th>
-                    <td>
-                      <b>{fmt(plan?.tp2_price)}</b> / <b>{fmt(plan?.tp3_price)}</b> <span className="muted">(RR 기반)</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <th>손절폭</th>
-                    <td>{plan?.stop_distance_pct ?? '-'}%</td>
-                  </tr>
-                  <tr>
-                    <th>진입 거리</th>
-                    <td>{plan?.entry_distance_pct ?? '-'}%</td>
-                  </tr>
-                  <tr>
-                    <th>권장 최대 배율</th>
-                    <td>
-                      <b>{plan?.max_leverage_by_risk ?? '-'}</b>x <span className="muted">(리스크 {plan?.risk_pct ?? '-'}%)</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <th>R:R(대략)</th>
-                    <td>
-                      {plan?.reward_risk_to_tp1 ?? '-'} <span className="muted">(TP1)</span>{' '}
-                      {plan?.reward_risk_to_tp2 !== undefined ? (
-                        <>
-                          · {plan.reward_risk_to_tp2} <span className="muted">(TP2)</span>
-                        </>
-                      ) : null}
-                    </td>
-                  </tr>
+                </thead>
+                <tbody>
+                {candidates.map((c: any) => (
+                  <tr key={c.tf}
+                    style={c.tf === rec?.plan?.tf ? { background: '#0b0f19' } : undefined}
+                  >
+                      <td>
+                        <b>{c.tf}</b>
+                      </td>
+                      <td>{c.entry_ease_score}</td>
+                      <td>{c.composite_score ?? '-'}</td>
+                      <td>{c.confidence ?? '-'}</td>
+                      <td>
+                        <div className="barWrap">
+                          <div
+                            className="barFill"
+                            style={{ width: `${Math.round((Number(c.backtest_score_norm) || 0) * 100)}%` }}
+                          />
+                        </div>
+                      </td>
+                      <td>{c.trigger_now ? 'READY' : 'WAIT'}</td>
+                      <td>{fmt(c.close)}</td>
+                      <td>{fmt(c.sma5)}</td>
+                      <td>{Number(c.rsi2).toFixed(2)}</td>
+                      <td>{fmtPct(c.atr_pct, 3)}</td>
+                      <td>{Math.round(Number(c.time_to_next_sec) / 60)}m</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
-
-            <div className="muted" style={{ marginTop: 10 }}>
-              청산 룰: {plan?.tp_rule ?? '-'}
-            </div>
-            <div className="muted" style={{ marginTop: 6 }}>
-              베스트 파라미터: {rec?.best_params?.entry_mode ?? '-'} / k={rec?.best_params?.entry_k ?? '-'} / stop={rec?.best_params?.stop_mult ?? '-'}
-            </div>
           </div>
-        </div>
-
-        <div className="card" style={{ marginTop: 12 }}>
-          <div style={{ fontSize: 16, fontWeight: 650 }}>TF 후보 점수</div>
-          <div className="muted" style={{ marginTop: 6 }}>
-            entry_ease_score가 높은 TF가 우선이며, 상위 후보는 최근 백테스트 점수(수익/MDD 균형)로 2차 선별합니다.
-          </div>
-
-          <div style={{ marginTop: 10, overflow: 'auto' }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>TF</th>
-                  <th>Score</th>
-                  <th>Comp</th>
-                  <th>Conf</th>
-                  <th>BT</th>
-                  <th>Signal</th>
-                  <th>Close</th>
-                  <th>SMA5</th>
-                  <th>RSI2</th>
-                  <th>ATR%</th>
-                  <th>Next</th>
-                </tr>
-              </thead>
-              <tbody>
-                {candidates.map((c: any) => (
-                  <tr key={c.tf}
-                    style={c.tf === selectedTf ? { background: '#0b0f19' } : undefined}
-                  >
-                    <td>
-                      <b>{c.tf}</b>
-                    </td>
-                    <td>{c.entry_ease_score}</td>
-                    <td>{c.composite_score ?? '-'}</td>
-                    <td>{c.confidence ?? '-'}</td>
-                    <td>
-                      <div className="barWrap">
-                        <div
-                          className="barFill"
-                          style={{ width: `${Math.round((Number(c.backtest_score_norm) || 0) * 100)}%` }}
-                        />
-                      </div>
-                    </td>
-                    <td>{c.trigger_now ? 'READY' : 'WAIT'}</td>
-                    <td>{fmt(c.close)}</td>
-                    <td>{fmt(c.sma5)}</td>
-                    <td>{Number(c.rsi2).toFixed(2)}</td>
-                    <td>{fmtPct(c.atr_pct, 3)}</td>
-                    <td>{Math.round(Number(c.time_to_next_sec) / 60)}m</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        ) : null}
       </div>
     </>
   );

@@ -232,7 +232,7 @@ def health():
 @app.get("/api/latest")
 def latest():
     out = {}
-    for tf in ("1D","30m","60m","180m"):
+    for tf in ("1m","5m","15m","1D","30m","60m","180m"):
         row = db.fetch_latest(tf)
         out[tf] = {"ts": int(row["ts"]), "close": float(row["close"])} if row else None
     return {"ok": True, "latest": out}

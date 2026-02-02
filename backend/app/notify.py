@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -16,8 +18,14 @@ def _read_webhook_from_file(path: Path) -> Optional[str]:
         return None
     for line in text.splitlines():
         s = line.strip()
+        if not s:
+            continue
         if s.startswith("https://discord.com/api/webhooks/"):
-            return s
+            return s.split()[0]
+    # fallback: regex search in entire file
+    m = re.search(r"https://discord\\.com/api/webhooks/\\S+", text)
+    if m:
+        return m.group(0).split()[0]
     return None
 
 def get_discord_webhook_url() -> Optional[str]:
@@ -86,7 +94,10 @@ def send_discord_webhook(message: Dict[str, Any]) -> Tuple[bool, str]:
     req = urllib.request.Request(
         url=url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 WonyoddReco",
+        },
         method="POST",
     )
     try:
@@ -94,5 +105,7 @@ def send_discord_webhook(message: Dict[str, Any]) -> Tuple[bool, str]:
             if 200 <= resp.status < 300:
                 return True, "sent"
             return False, f"http_{resp.status}"
+    except urllib.error.HTTPError as e:
+        return False, f"http_{e.code}"
     except Exception as e:
-        return False, f"error: {e}"
+        return False, f"error: {type(e).__name__}"

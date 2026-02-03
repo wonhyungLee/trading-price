@@ -16,9 +16,11 @@ function toTs(t: number): UTCTimestamp {
 export default function PriceChart({
   candles,
   scenario,
+  windowBars = 80,
 }: {
   candles: Candle[];
   scenario?: Scenario | null;
+  windowBars?: number;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -162,8 +164,20 @@ export default function PriceChart({
           .filter((v): v is { time: UTCTimestamp; value: number } => v !== null),
       );
     }
-    chart.timeScale().fitContent();
-  }, [candleData, closeSeries, timeSeries]);
+    if (candleData.length > 0) {
+      const lastIndex = candleData.length - 1;
+      const futureBars = 10; // keep some right-side space for scenario points
+      const from = Math.max(0, lastIndex - Math.max(10, windowBars) + 1);
+      const to = lastIndex + futureBars;
+
+      // If user has manually scrolled far to the left, don't snap back every update.
+      const current = chart.timeScale().getVisibleLogicalRange();
+      const userScrolledAway = current && current.to < lastIndex - 5;
+      if (!userScrolledAway) {
+        chart.timeScale().setVisibleLogicalRange({ from, to });
+      }
+    }
+  }, [candleData, closeSeries, timeSeries, windowBars]);
 
   useEffect(() => {
     // Clean old price lines

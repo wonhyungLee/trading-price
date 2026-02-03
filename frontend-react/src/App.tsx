@@ -44,6 +44,7 @@ function formatDiscordDetail(detail?: string): string {
 }
 
 export default function App() {
+  const chartWindowBars = 80;
   const [side, setSide] = useState<Side>('long');
   const [riskPct, setRiskPct] = useState<number>(0.5);
 
@@ -430,7 +431,7 @@ export default function App() {
             </div>
 
             <div className="chartBox">
-              <PriceChart candles={candles} scenario={hasPlan ? scenario : null} />
+              <PriceChart candles={candles} scenario={hasPlan ? scenario : null} windowBars={chartWindowBars} />
             </div>
 
             <div className="muted panelFoot">

@@ -21,6 +21,11 @@ from .config import (
     SPIKE_NOTIFY_ONLY_BAR_CLOSE,
     SPIKE_NOTIFY_ONLY_READY,
     SPIKE_NOTIFY_COOLDOWN_SEC,
+    READY_NOTIFY_ENABLED,
+    READY_NOTIFY_TFS,
+    READY_NOTIFY_SIDE,
+    READY_NOTIFY_ONLY_BAR_CLOSE,
+    READY_NOTIFY_COOLDOWN_SEC,
 )
 from . import db
 from .models import WebhookPayload
@@ -109,6 +114,9 @@ def _maybe_notify_spike(tf: str, ts: int, payload: WebhookPayload) -> None:
     recs = []
     if side_mode in ("long", "short"):
         recs.append(recommend(side=side_mode))
+    elif side_mode == "both":
+        recs.append(recommend(side="long"))
+        recs.append(recommend(side="short"))
     else:
         rec_long = recommend(side="long")
         rec_short = recommend(side="short")
@@ -126,7 +134,7 @@ def _maybe_notify_spike(tf: str, ts: int, payload: WebhookPayload) -> None:
         kind = f"{ctx.get('kind', 'spike')}:{side}"
 
         if db.notification_exists(kind, tf, ts):
-            return
+            continue
 
         last = db.fetch_latest_notification(kind)
         if last:
@@ -134,17 +142,69 @@ def _maybe_notify_spike(tf: str, ts: int, payload: WebhookPayload) -> None:
                 last_created = int(last["created_ts"])
                 if int(SPIKE_NOTIFY_COOLDOWN_SEC) > 0 and (now - last_created) < int(SPIKE_NOTIFY_COOLDOWN_SEC):
                     print("[DEBUG] Spike notify skipped (cooldown)")
-                    return
+                    continue
             except Exception:
                 pass
 
         if SPIKE_NOTIFY_ONLY_READY and (rec.get("selected") or {}).get("status") != "ready":
             print("[DEBUG] Spike notify skipped (status!=ready)")
-            return
+            continue
 
         msg = build_discord_message(rec, context=ctx, content="스파이크 감지 → 추천")
         ok, detail = send_discord_webhook(msg)
         print(f"[DEBUG] Spike notify: ok={ok} detail={detail}")
+        if ok:
+            db.insert_notification(kind, tf, ts, created_ts=now, detail=json.dumps({"ctx": ctx, "detail": detail}, ensure_ascii=False))
+
+def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload) -> None:
+    if not READY_NOTIFY_ENABLED:
+        return
+
+    enabled_tfs = _parse_tf_list(READY_NOTIFY_TFS)
+    if enabled_tfs and tf not in enabled_tfs:
+        return
+
+    if READY_NOTIFY_ONLY_BAR_CLOSE and not _is_bar_close(payload):
+        return
+
+    side_mode = str(READY_NOTIFY_SIDE or "both").strip().lower()
+    recs: list[tuple[str, dict]] = []
+    if side_mode in ("long", "short"):
+        recs.append((side_mode, recommend(side=side_mode, focus_tf=tf)))
+    elif side_mode == "both":
+        recs.append(("long", recommend(side="long", focus_tf=tf)))
+        recs.append(("short", recommend(side="short", focus_tf=tf)))
+    else:
+        rec_long = recommend(side="long", focus_tf=tf)
+        rec_short = recommend(side="short", focus_tf=tf)
+        side = _choose_auto_side(rec_long, rec_short)
+        recs.append((side, rec_long if side == "long" else rec_short))
+
+    now = int(time.time())
+    ctx = {"kind": "ready", "timeframe": tf, "ts": int(ts)}
+    for side, rec in recs:
+        if not rec or not rec.get("ok"):
+            continue
+        if (rec.get("selected") or {}).get("status") != "ready":
+            continue
+
+        kind = f"ready:{tf}:{side}"
+        if db.notification_exists(kind, tf, ts):
+            continue
+
+        last = db.fetch_latest_notification(kind)
+        if last:
+            try:
+                last_created = int(last["created_ts"])
+                if int(READY_NOTIFY_COOLDOWN_SEC) > 0 and (now - last_created) < int(READY_NOTIFY_COOLDOWN_SEC):
+                    print("[DEBUG] Ready notify skipped (cooldown)")
+                    continue
+            except Exception:
+                pass
+
+        msg = build_discord_message(rec, context=ctx, content="READY 신호 → 추천")
+        ok, detail = send_discord_webhook(msg)
+        print(f"[DEBUG] Ready notify: ok={ok} detail={detail}")
         if ok:
             db.insert_notification(kind, tf, ts, created_ts=now, detail=json.dumps({"ctx": ctx, "detail": detail}, ensure_ascii=False))
 
@@ -311,6 +371,10 @@ async def tradingview_webhook(req: Request):
         _maybe_notify_spike(tf, ts, payload)
     except Exception as e:
         print(f"[WARN] Spike notify error: {type(e).__name__}: {e}")
+    try:
+        _maybe_notify_ready(tf, ts, payload)
+    except Exception as e:
+        print(f"[WARN] Ready notify error: {type(e).__name__}: {e}")
 
     return {"ok": True, "timeframe": tf, "ts": ts}
 

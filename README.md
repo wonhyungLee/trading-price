@@ -51,6 +51,11 @@ bash install.sh
 - `WONYODD_SPIKE_RANGE_LOOKBACK`: 변동성 기준선 계산용 lookback bar 수(기본 20)
 - `WONYODD_SPIKE_RANGE_MULT`: 변동성 스파이크 배수(기본 2.0). 현재 bar range% >= (이전 N개 range% median) * 배수
 - `WONYODD_SPIKE_MIN_RANGE_PCT`: 변동성 최소 조건(기본 0.4%). range% = (high-low)/close*100
+- `WONYODD_READY_NOTIFY_ENABLED`: true면 30m/60m/180m에서 추천 상태가 READY일 때 자동으로 디스코드 알림 전송(기본 false)
+- `WONYODD_READY_NOTIFY_TFS`: READY 감지할 TF 목록(기본 `30m,60m,180m`)
+- `WONYODD_READY_NOTIFY_SIDE`: 알림 방향(기본 `both`). `both|long|short|auto`
+- `WONYODD_READY_NOTIFY_ONLY_BAR_CLOSE`: true면 봉 마감에서만 알림(권장)
+- `WONYODD_READY_NOTIFY_COOLDOWN_SEC`: READY 알림 쿨다운(초, 기본 0 = 끔)
 
 ---
 

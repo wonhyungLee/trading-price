@@ -41,6 +41,9 @@ a {
   max-width: 1280px;
   margin: 0 auto;
   padding: 1.25rem;
+  padding-left: calc(1.25rem + env(safe-area-inset-left));
+  padding-right: calc(1.25rem + env(safe-area-inset-right));
+  padding-bottom: calc(1.25rem + env(safe-area-inset-bottom));
 }
 
 .muted {
@@ -62,6 +65,7 @@ a {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
+  padding-top: calc(1.25rem + env(safe-area-inset-top));
 }
 
 .brandTitle {
@@ -135,7 +139,7 @@ a {
   border: 0;
   outline: none;
   color: var(--text);
-  font-size: 1rem;
+  font-size: max(16px, 1rem);
 }
 
 .btn {
@@ -185,6 +189,10 @@ a {
   flex-wrap: wrap;
   align-items: center;
   margin-top: 0.35rem;
+}
+
+.statusRight {
+  margin-left: auto;
 }
 
 .statusItem {
@@ -480,6 +488,11 @@ a {
   background: rgba(255, 255, 255, 0.07);
 }
 
+.tableScroll {
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* Modal */
 .modalOverlay {
   position: fixed;
@@ -545,7 +558,7 @@ a {
   border: 1px solid var(--border2);
   background: rgba(0, 0, 0, 0.18);
   color: var(--text);
-  font-size: 1rem;
+  font-size: max(16px, 1rem);
   outline: none;
 }
 
@@ -581,4 +594,143 @@ a {
   border-radius: 999px;
   font-size: 0.85rem;
   color: rgba(231, 233, 238, 0.92);
+}
+
+@media (max-width: 720px) {
+  .wrap {
+    padding: 0.9rem;
+    padding-left: calc(0.9rem + env(safe-area-inset-left));
+    padding-right: calc(0.9rem + env(safe-area-inset-right));
+    padding-bottom: calc(0.9rem + env(safe-area-inset-bottom));
+  }
+
+  .topBarInner {
+    flex-direction: column;
+    align-items: stretch;
+    padding-top: calc(0.9rem + env(safe-area-inset-top));
+  }
+
+  .brandSub {
+    max-width: none;
+  }
+
+  .topControls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "side side"
+      "risk risk"
+      "recommend recommend"
+      "discord glossary"
+      "font font";
+    gap: 0.65rem;
+    justify-content: stretch;
+  }
+
+  .controlSide {
+    grid-area: side;
+  }
+
+  .controlRisk {
+    grid-area: risk;
+  }
+
+  .controlRecommend {
+    grid-area: recommend;
+  }
+
+  .controlDiscord {
+    grid-area: discord;
+  }
+
+  .controlGlossary {
+    grid-area: glossary;
+  }
+
+  .controlFont {
+    grid-area: font;
+    justify-content: space-between;
+  }
+
+  .segBtn,
+  .btn,
+  .inputGroup {
+    min-height: 44px;
+  }
+
+  .segBtn {
+    flex: 1;
+    padding: 0.75rem 0.95rem;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .btn {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .helpBtn,
+  .iconBtn {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .numInput {
+    width: 100%;
+    min-width: 0;
+    text-align: right;
+  }
+
+  .statusRow {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .statusRight {
+    margin-left: 0;
+  }
+
+  .panel {
+    padding: 0.85rem;
+  }
+
+  .panelHeader {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .priceHeader {
+    text-align: left;
+  }
+
+  .chartBox {
+    height: clamp(280px, 48vh, 420px);
+  }
+
+  .barWrap {
+    width: 72px;
+  }
+
+  .table th,
+  .table td {
+    padding: 0.65rem 0.55rem;
+  }
+
+  /* Mobile: keep ranking table readable without horizontal scroll fatigue */
+  .table th:nth-child(3),
+  .table td:nth-child(3),
+  .table th:nth-child(5),
+  .table td:nth-child(5),
+  .table th:nth-child(8),
+  .table td:nth-child(8),
+  .table th:nth-child(9),
+  .table td:nth-child(9),
+  .table th:nth-child(10),
+  .table td:nth-child(10) {
+    display: none;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: 92vh;
+  }
 }

@@ -309,7 +309,7 @@ export default function App() {
           </div>
 
           <div className="topControls">
-            <div className="segmented">
+            <div className="segmented controlSide">
               <button
                 className={`segBtn ${side === 'long' ? 'segBtnActiveLong' : ''}`}
                 onClick={() => {
@@ -332,7 +332,7 @@ export default function App() {
               </button>
             </div>
 
-            <div className="inputGroup">
+            <div className="inputGroup controlRisk">
               <div className="muted inputLabel">리스크(%)</div>
               <input
                 className="numInput"
@@ -346,15 +346,15 @@ export default function App() {
               />
             </div>
 
-            <button className="btn btnPrimary" onClick={() => runRecommend(side)} disabled={busy}>
+            <button className="btn btnPrimary controlRecommend" onClick={() => runRecommend(side)} disabled={busy}>
               {busy ? '계산 중...' : '추천 계산'}
             </button>
 
-            <button className="btn" onClick={sendDiscord} disabled={busy || !hasPlan}>
+            <button className="btn controlDiscord" onClick={sendDiscord} disabled={busy || !hasPlan}>
               디스코드 전송
             </button>
 
-            <div className="fontControls">
+            <div className="fontControls controlFont">
               <button className="btn btnTiny" onClick={() => setFontBasePx((v) => clampInt(v - 1, 14, 20))}>
                 A-
               </button>
@@ -367,7 +367,7 @@ export default function App() {
               </button>
             </div>
 
-            <button className="btn" onClick={() => openGlossary()}>
+            <button className="btn controlGlossary" onClick={() => openGlossary()}>
               용어사전
             </button>
           </div>
@@ -384,7 +384,7 @@ export default function App() {
             </span>
           </div>
 
-          <div className="statusItem muted" style={{ marginLeft: 'auto' }}>
+          <div className="statusItem muted statusRight">
             {latest?.latest ? (
               <>
                 1m {fmtTs(latest.latest['1m']?.ts)} · 30m {fmtTs(latest.latest['30m']?.ts)} · 60m {fmtTs(latest.latest['60m']?.ts)} · 180m{' '}
@@ -560,7 +560,7 @@ export default function App() {
               </div>
             </div>
 
-            <div style={{ overflow: 'auto' }}>
+            <div className="tableScroll">
               <table className="table">
                 <thead>
                   <tr>

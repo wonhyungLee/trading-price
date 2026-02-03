@@ -152,10 +152,34 @@ export default function App() {
     }
   }
 
+  async function selectTimeframe(tf: string) {
+    if (!tf) return;
+    setBusy(true);
+    setErr(null);
+    setNotifyMsg(null);
+    try {
+      const data = await fetchRecommend(side, riskPct, tf);
+      if (!data.ok) {
+        setRec(data);
+        setScenario(null);
+        setErr(data.error ?? 'unknown error');
+        return;
+      }
+      setRec(data);
+      setScenario(data.plan?.scenario ?? null);
+      if (data.plan?.tf) setChartTf(data.plan.tf);
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+      refreshLatestUI();
+    }
+  }
+
   async function sendDiscord() {
     setNotifyMsg(null);
     try {
-      const res = await notifyRecommend(side, riskPct);
+      const res = await notifyRecommend(side, riskPct, rec?.plan?.tf);
       if (!res.ok) {
         setNotifyMsg(formatDiscordDetail(res.detail));
         return;
@@ -568,7 +592,16 @@ export default function App() {
                 </thead>
                 <tbody>
                   {candidates.map((c: any) => (
-                    <tr key={c.tf} className={c.tf === rec?.plan?.tf ? 'rowActive' : ''}>
+                    <tr
+                      key={c.tf}
+                      className={c.tf === rec?.plan?.tf ? 'rowActive' : ''}
+                      onClick={() => selectTimeframe(String(c.tf))}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') selectTimeframe(String(c.tf));
+                      }}
+                    >
                       <td>
                         <b>{c.tf}</b>
                       </td>
@@ -599,4 +632,3 @@ export default function App() {
     </>
   );
 }
-

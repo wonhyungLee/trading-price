@@ -293,7 +293,7 @@ def build_plan(candidate: Dict[str, Any], side: str, best_params: Optional[Dict[
         "recent_metrics": best_params.get('metrics') if (best_params and best_params.get('ok')) else None,
     }
 
-def recommend(side: str, risk_pct: Optional[float]=None) -> Dict[str, Any]:
+def recommend(side: str, risk_pct: Optional[float]=None, focus_tf: Optional[str] = None) -> Dict[str, Any]:
     side = side.lower().strip()
     if side not in ("long", "short"):
         raise ValueError("side must be 'long' or 'short'")
@@ -370,6 +370,24 @@ def recommend(side: str, risk_pct: Optional[float]=None) -> Dict[str, Any]:
     )
 
     chosen = candidates_sorted[0]
+    if focus_tf is not None:
+        tf_norm = tf_key(focus_tf)
+        if tf_norm not in ("30m", "60m", "180m"):
+            return {
+                "ok": False,
+                "error": "unsupported tf; use 30m,60m,180m",
+                "regime": reg,
+                "candidates": candidates_sorted,
+            }
+        match = next((c for c in candidates_sorted if c.get("tf") == tf_norm), None)
+        if not match:
+            return {
+                "ok": False,
+                "error": f"not_enough_data_for_{tf_norm}",
+                "regime": reg,
+                "candidates": candidates_sorted,
+            }
+        chosen = match
     best_params_map = chosen.get("best_params") or None
     plan = build_plan(chosen, side, best_params=best_params_map, risk_pct=risk_pct)
 

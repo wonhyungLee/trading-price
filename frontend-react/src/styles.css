@@ -431,6 +431,15 @@ a {
   background: rgba(255, 255, 255, 0.03);
 }
 
+.table tbody tr {
+  cursor: pointer;
+}
+
+.table tbody tr:focus-visible td {
+  outline: 2px solid rgba(75, 107, 181, 0.8);
+  outline-offset: -2px;
+}
+
 .rowActive td {
   background: rgba(11, 15, 25, 0.85);
 }
@@ -573,4 +582,3 @@ a {
   font-size: 0.85rem;
   color: rgba(231, 233, 238, 0.92);
 }
-

@@ -44,18 +44,25 @@ export async function fetchLatest(): Promise<any> {
   return getJson('/api/latest');
 }
 
-export async function fetchRecommend(side: 'long' | 'short', riskPct?: number): Promise<RecommendResponse> {
+export async function fetchRecommend(
+  side: 'long' | 'short',
+  riskPct?: number,
+  tf?: string,
+): Promise<RecommendResponse> {
   const q = new URLSearchParams({ side });
   if (riskPct !== undefined && Number.isFinite(riskPct)) q.set('risk_pct', String(riskPct));
+  if (tf) q.set('tf', tf);
   return getJson(`/api/recommend?${q.toString()}`);
 }
 
 export async function notifyRecommend(
   side: 'long' | 'short',
   riskPct?: number,
+  tf?: string,
 ): Promise<{ ok: boolean; detail?: string; recommend?: RecommendResponse }> {
   const q = new URLSearchParams({ side });
   if (riskPct !== undefined && Number.isFinite(riskPct)) q.set('risk_pct', String(riskPct));
+  if (tf) q.set('tf', tf);
   const res = await fetch(`${API_BASE}/api/notify/recommend?${q.toString()}`, { method: 'POST' });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status}`);

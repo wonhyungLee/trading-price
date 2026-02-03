@@ -208,17 +208,17 @@ def candles(tf: str, limit: int = 200):
     return {"ok": True, "timeframe": tf_norm, "data": data}
 
 @app.get("/api/recommend")
-def api_recommend(side: str, risk_pct: Optional[float] = None):
+def api_recommend(side: str, risk_pct: Optional[float] = None, tf: Optional[str] = None):
     try:
-        out = recommend(side=side, risk_pct=risk_pct)
+        out = recommend(side=side, risk_pct=risk_pct, focus_tf=tf)
         return JSONResponse(out)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/notify/recommend")
-def api_notify_recommend(side: str, risk_pct: Optional[float] = None):
+def api_notify_recommend(side: str, risk_pct: Optional[float] = None, tf: Optional[str] = None):
     try:
-        out = recommend(side=side, risk_pct=risk_pct)
+        out = recommend(side=side, risk_pct=risk_pct, focus_tf=tf)
         msg = build_discord_message(out)
         ok, detail = send_discord_webhook(msg)
         return {"ok": ok, "detail": detail, "recommend": out}

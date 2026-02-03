@@ -19,6 +19,16 @@ CREATE TABLE IF NOT EXISTS candles (
   PRIMARY KEY (timeframe, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_candles_tf_ts ON candles(timeframe, ts);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  kind TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  created_ts INTEGER NOT NULL,
+  detail TEXT,
+  PRIMARY KEY (kind, timeframe, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_kind_created ON notifications(kind, created_ts);
 """
 
 def connect() -> sqlite3.Connection:
@@ -90,5 +100,40 @@ def timeframes_available() -> List[str]:
     try:
         cur = conn.execute("""SELECT DISTINCT timeframe FROM candles""")
         return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+def notification_exists(kind: str, timeframe: str, ts: int) -> bool:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            """SELECT 1 FROM notifications WHERE kind=? AND timeframe=? AND ts=? LIMIT 1""",
+            (kind, timeframe, int(ts)),
+        )
+        return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+def fetch_latest_notification(kind: str) -> Optional[sqlite3.Row]:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            """SELECT * FROM notifications WHERE kind=? ORDER BY created_ts DESC LIMIT 1""",
+            (kind,),
+        )
+        return cur.fetchone()
+    finally:
+        conn.close()
+
+def insert_notification(kind: str, timeframe: str, ts: int, created_ts: int, detail: Optional[str] = None) -> bool:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO notifications(kind, timeframe, ts, created_ts, detail)
+               VALUES (?, ?, ?, ?, ?)""",
+            (kind, timeframe, int(ts), int(created_ts), detail),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
     finally:
         conn.close()

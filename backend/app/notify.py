@@ -4,6 +4,7 @@ import json
 import re
 import urllib.request
 import urllib.error
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -50,7 +51,20 @@ def get_discord_webhook_url() -> Optional[str]:
                 return url
     return None
 
-def build_discord_message(rec: Dict[str, Any]) -> Dict[str, Any]:
+def _fmt_num(x: Any, digits: int = 2) -> str:
+    try:
+        n = float(x)
+        if digits <= 0:
+            return f"{n:,.0f}"
+        return f"{n:,.{digits}f}"
+    except Exception:
+        return str(x)
+
+def build_discord_message(
+    rec: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+    content: Optional[str] = None,
+) -> Dict[str, Any]:
     plan = rec.get("plan") or {}
     regime = rec.get("regime") or {}
     selected = rec.get("selected") or {}
@@ -72,6 +86,31 @@ def build_discord_message(rec: Dict[str, Any]) -> Dict[str, Any]:
         {"name": "R:R", "value": f"{plan.get('reward_risk_to_tp1', '-')}", "inline": True},
     ]
 
+    if context:
+        lines = []
+        try:
+            ts = int(context.get("ts") or 0)
+            if ts > 0:
+                tf = context.get("timeframe") or "-"
+                t = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                lines.append(f"Bar: {tf} @ {t}")
+        except Exception:
+            pass
+
+        if context.get("volume") is not None and context.get("volume_base") is not None:
+            lines.append(
+                f"Volume: {_fmt_num(context.get('volume'), 0)} (base {_fmt_num(context.get('volume_base'), 0)}, x{context.get('volume_ratio', '-')})"
+            )
+        if context.get("range_pct") is not None and context.get("range_base") is not None:
+            lines.append(
+                f"Range: {_fmt_num(context.get('range_pct'), 3)}% (base {_fmt_num(context.get('range_base'), 3)}%, x{context.get('range_ratio', '-')})"
+            )
+
+        if lines:
+            fields.insert(0, {"name": "Trigger", "value": "\n".join(lines), "inline": False})
+        if content is None:
+            content = "스파이크 감지 → 추천 업데이트"
+
     if regime.get("bias"):
         fields.append({"name": "Regime", "value": f"{regime.get('bias')} (conf {regime.get('confidence')})", "inline": False})
 
@@ -83,7 +122,9 @@ def build_discord_message(rec: Dict[str, Any]) -> Dict[str, Any]:
         "color": 0x4B6BB5,
         "fields": fields,
     }
-    return {"content": "추천 업데이트", "embeds": [embed]}
+    if content is None:
+        content = "추천 업데이트"
+    return {"content": content, "embeds": [embed]}
 
 def send_discord_webhook(message: Dict[str, Any]) -> Tuple[bool, str]:
     url = get_discord_webhook_url()

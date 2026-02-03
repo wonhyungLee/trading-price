@@ -9,11 +9,26 @@ from fastapi.staticfiles import StaticFiles
 
 from dateutil import parser as dtparser
 
-from .config import WEBHOOK_SECRET, REQUIRE_BAR_CLOSE, VALIDATE_TS_ALIGNMENT, RESAMPLE_FROM_LOWER_TF, INCLUDE_PARTIAL_BARS
+from .config import (
+    WEBHOOK_SECRET,
+    REQUIRE_BAR_CLOSE,
+    VALIDATE_TS_ALIGNMENT,
+    RESAMPLE_FROM_LOWER_TF,
+    INCLUDE_PARTIAL_BARS,
+    SPIKE_NOTIFY_ENABLED,
+    SPIKE_NOTIFY_TFS,
+    SPIKE_NOTIFY_SIDE,
+    SPIKE_NOTIFY_ONLY_BAR_CLOSE,
+    SPIKE_NOTIFY_ONLY_READY,
+    SPIKE_NOTIFY_COOLDOWN_SEC,
+)
 from . import db
 from .models import WebhookPayload
 from .recommend import recommend, tf_key
 from .notify import build_discord_message, send_discord_webhook
+from .alerts import detect_volume_volatility_spike
+
+import json
 
 # Resolve project root (/opt/wonyodd-reco)
 PROJECT_ROOT = Path("/opt/wonyodd-reco")
@@ -21,6 +36,117 @@ FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
 app = FastAPI(title="Wonyodd Reco Engine", version="1.0.0")
 db.init_db()
+
+def _parse_tf_list(s: str) -> set[str]:
+    out: set[str] = set()
+    for part in str(s or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        k = tf_key(part)
+        out.add(k or part)
+    return out
+
+def _choose_auto_side(rec_long: dict, rec_short: dict) -> str:
+    ok_l = bool(rec_long.get("ok"))
+    ok_s = bool(rec_short.get("ok"))
+    if ok_l and not ok_s:
+        return "long"
+    if ok_s and not ok_l:
+        return "short"
+    if not ok_l and not ok_s:
+        return "long"
+
+    sel_l = rec_long.get("selected") or {}
+    sel_s = rec_short.get("selected") or {}
+    status_l = sel_l.get("status")
+    status_s = sel_s.get("status")
+    if status_l == "ready" and status_s != "ready":
+        return "long"
+    if status_s == "ready" and status_l != "ready":
+        return "short"
+
+    try:
+        score_l = float(sel_l.get("composite_score") or 0.0)
+    except Exception:
+        score_l = 0.0
+    try:
+        score_s = float(sel_s.get("composite_score") or 0.0)
+    except Exception:
+        score_s = 0.0
+    if score_l > score_s:
+        return "long"
+    if score_s > score_l:
+        return "short"
+
+    bias = (rec_long.get("regime") or {}).get("bias") or (rec_short.get("regime") or {}).get("bias")
+    if bias == "short_favored":
+        return "short"
+    return "long"
+
+def _maybe_notify_spike(tf: str, ts: int, payload: WebhookPayload) -> None:
+    if not SPIKE_NOTIFY_ENABLED:
+        return
+
+    enabled_tfs = _parse_tf_list(SPIKE_NOTIFY_TFS)
+    if enabled_tfs and tf not in enabled_tfs:
+        return
+
+    if SPIKE_NOTIFY_ONLY_BAR_CLOSE and not _is_bar_close(payload):
+        return
+
+    ctx = detect_volume_volatility_spike(tf, ts)
+    if not ctx:
+        return
+
+    # Add symbol context if present
+    if payload.symbol:
+        ctx["symbol"] = payload.symbol
+    if payload.exchange:
+        ctx["exchange"] = payload.exchange
+
+    side_mode = str(SPIKE_NOTIFY_SIDE or "auto").strip().lower()
+    recs = []
+    if side_mode in ("long", "short"):
+        recs.append(recommend(side=side_mode))
+    else:
+        rec_long = recommend(side="long")
+        rec_short = recommend(side="short")
+        side = _choose_auto_side(rec_long, rec_short)
+        recs.append(rec_long if side == "long" else rec_short)
+
+    now = int(time.time())
+    for rec in recs:
+        if not rec or not rec.get("ok"):
+            print("[WARN] Spike notify: recommend failed")
+            continue
+
+        plan = rec.get("plan") or {}
+        side = str(plan.get("side") or "").lower() or str(rec.get("side") or "").lower() or "auto"
+        kind = f"{ctx.get('kind', 'spike')}:{side}"
+
+        if db.notification_exists(kind, tf, ts):
+            return
+
+        last = db.fetch_latest_notification(kind)
+        if last:
+            try:
+                last_created = int(last["created_ts"])
+                if int(SPIKE_NOTIFY_COOLDOWN_SEC) > 0 and (now - last_created) < int(SPIKE_NOTIFY_COOLDOWN_SEC):
+                    print("[DEBUG] Spike notify skipped (cooldown)")
+                    return
+            except Exception:
+                pass
+
+        if SPIKE_NOTIFY_ONLY_READY and (rec.get("selected") or {}).get("status") != "ready":
+            print("[DEBUG] Spike notify skipped (status!=ready)")
+            return
+
+        msg = build_discord_message(rec, context=ctx, content="스파이크 감지 → 추천")
+        ok, detail = send_discord_webhook(msg)
+        print(f"[DEBUG] Spike notify: ok={ok} detail={detail}")
+        if ok:
+            db.insert_notification(kind, tf, ts, created_ts=now, detail=json.dumps({"ctx": ctx, "detail": detail}, ensure_ascii=False))
 
 def _parse_ts(payload: WebhookPayload) -> int:
     # 1. ts field
@@ -181,6 +307,10 @@ async def tradingview_webhook(req: Request):
         features=payload.features,
     )
     _resample_from_lower_tf(tf, ts)
+    try:
+        _maybe_notify_spike(tf, ts, payload)
+    except Exception as e:
+        print(f"[WARN] Spike notify error: {type(e).__name__}: {e}")
 
     return {"ok": True, "timeframe": tf, "ts": ts}
 

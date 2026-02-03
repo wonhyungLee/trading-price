@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { fetchCandles, fetchLatest, fetchRecommend, notifyRecommend, type Candle, type Scenario } from './api';
 import PriceChart from './components/PriceChart';
+import GlossaryModal from './components/GlossaryModal';
 
 type Side = 'long' | 'short';
 
@@ -9,6 +10,7 @@ function fmt(x: any): string {
   if (!Number.isFinite(n)) return '-';
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
+
 function fmtPct(x: any, digits = 2): string {
   const n = Number(x);
   if (!Number.isFinite(n)) return '-';
@@ -20,28 +22,107 @@ function fmtTs(ts: number | undefined): string {
   return new Date(ts * 1000).toLocaleString();
 }
 
+function fmtCountdown(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  const mm = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${mm}:${String(ss).padStart(2, '0')}`;
+}
+
+function clampInt(x: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, Math.round(x)));
+}
+
+function formatDiscordDetail(detail?: string): string {
+  if (!detail) return '전송 실패';
+  if (detail === 'discord_webhook_missing') {
+    return '디스코드 웹훅이 설정되지 않았습니다. (WONYODD_DISCORD_WEBHOOK_URL 또는 WONYODD_DISCORD_WEBHOOK_FILE)';
+  }
+  if (detail.startsWith('http_')) return `디스코드 요청 실패 (${detail})`;
+  if (detail.startsWith('error:')) return '디스코드 전송 중 오류';
+  return detail;
+}
+
 export default function App() {
   const [side, setSide] = useState<Side>('long');
   const [riskPct, setRiskPct] = useState<number>(0.5);
+
   const [latest, setLatest] = useState<any>(null);
   const [rec, setRec] = useState<any>(null);
+
   const [candles, setCandles] = useState<Candle[]>([]);
   const [scenario, setScenario] = useState<Scenario | null>(null);
   const [chartTf, setChartTf] = useState<string>('30m');
+
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
-  const [serverOffsetMs, setServerOffsetMs] = useState<number>(0);
-  const [minuteCountdown, setMinuteCountdown] = useState<number>(60);
 
+  const [serverOffsetMs, setServerOffsetMs] = useState<number>(0);
+  const [nextUpdateAtMs, setNextUpdateAtMs] = useState<number | null>(null);
+  const [countdownSec, setCountdownSec] = useState<number>(0);
+  const [lastUpdateAgeSec, setLastUpdateAgeSec] = useState<number | null>(null);
+
+  const [glossaryOpen, setGlossaryOpen] = useState(false);
+  const [glossaryQuery, setGlossaryQuery] = useState<string>('');
+
+  const [fontBasePx, setFontBasePx] = useState<number>(() => {
+    try {
+      const v = localStorage.getItem('wonyodd_font_base_px');
+      const n = v ? Number(v) : 16;
+      return clampInt(Number.isFinite(n) ? n : 16, 14, 20);
+    } catch {
+      return 16;
+    }
+  });
+
+  const hasPlan = Boolean(rec?.plan?.entry_price);
   const selectedTf = rec?.plan?.tf ?? chartTf;
 
-  async function refreshLatestUI() {
+  const lastCandle = candles.length > 0 ? candles[candles.length - 1] : null;
+  const prevCandle = candles.length > 1 ? candles[candles.length - 2] : null;
+  const lastPrice = lastCandle?.close;
+  const priceDelta = (prevCandle && lastCandle) ? (lastCandle.close - prevCandle.close) : null;
+  const priceDeltaPct = (prevCandle && lastCandle && prevCandle.close) ? (priceDelta! / prevCandle.close) * 100.0 : null;
+
+  const regime = rec?.regime;
+  const plan = rec?.plan;
+  const selected = rec?.selected;
+  const notes: string[] = Array.isArray(rec?.notes) ? rec.notes : [];
+  const candidates = useMemo(() => (Array.isArray(rec?.candidates) ? rec.candidates : []), [rec]);
+
+  function openGlossary(term?: string) {
+    setGlossaryQuery(term ?? '');
+    setGlossaryOpen(true);
+  }
+
+  function Term({ label, term }: { label: string; term: string }) {
+    return (
+      <span className="termLabel">
+        <span>{label}</span>
+        <button className="helpBtn" onClick={() => openGlossary(term)} aria-label={`${term} 설명`}>
+          ?
+        </button>
+      </span>
+    );
+  }
+
+  async function refreshLatestUI(): Promise<any | null> {
     try {
       const data = await fetchLatest();
       setLatest(data);
-    } catch (e: any) {
-      // ignore
+
+      const latest1mTs = Number(data?.latest?.['1m']?.ts);
+      if (Number.isFinite(latest1mTs) && latest1mTs > 0) {
+        // TradingView time is bar open-time. Alert arrives on bar close.
+        // Next alert is expected at next bar close => latest_open + 120s.
+        setNextUpdateAtMs((latest1mTs + 120) * 1000);
+      } else {
+        setNextUpdateAtMs(null);
+      }
+      return data;
+    } catch {
+      return null;
     }
   }
 
@@ -53,28 +134,20 @@ export default function App() {
       const data = await fetchRecommend(nextSide, riskPct);
       if (!data.ok) {
         setRec(data);
-        setCandles([]);
         setScenario(null);
         setErr(data.error ?? 'unknown error');
         return;
       }
+
       setRec(data);
-
       const tf = data.plan?.tf;
-      const scen = data.plan?.scenario ?? null;
-      setScenario(scen);
+      setScenario(data.plan?.scenario ?? null);
       if (tf) setChartTf(tf);
-
-      if (tf) {
-        const c = await fetchCandles(tf, 5000);
-        setCandles(c.candles ?? []);
-      } else {
-        setCandles([]);
-      }
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
       setBusy(false);
+      // Refresh latest after heavy compute so UI shows up-to-date timestamps.
       refreshLatestUI();
     }
   }
@@ -84,23 +157,33 @@ export default function App() {
     try {
       const res = await notifyRecommend(side, riskPct);
       if (!res.ok) {
-        setNotifyMsg(res.detail ?? 'discord send failed');
+        setNotifyMsg(formatDiscordDetail(res.detail));
         return;
       }
-      if (res.recommend?.ok) {
-        setRec(res.recommend);
-      }
+      if (res.recommend?.ok) setRec(res.recommend);
       setNotifyMsg('디스코드 전송 완료');
     } catch (e: any) {
       setNotifyMsg(e?.message ?? String(e));
     }
   }
 
+  // Apply base font size (A-/A+)
+  useEffect(() => {
+    document.documentElement.style.setProperty('--font-base', `${fontBasePx}px`);
+    try {
+      localStorage.setItem('wonyodd_font_base_px', String(fontBasePx));
+    } catch {
+      // ignore
+    }
+  }, [fontBasePx]);
+
+  // Initial load
   useEffect(() => {
     refreshLatestUI();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Server clock sync
   useEffect(() => {
     let cancelled = false;
     const syncServerTime = async () => {
@@ -125,40 +208,54 @@ export default function App() {
     };
   }, []);
 
+  // Countdown + lag indicator
   useEffect(() => {
     const tick = () => {
-      const now = Date.now() + serverOffsetMs;
-      const sec = Math.floor(now / 1000) % 60;
-      const remaining = sec === 0 ? 60 : 60 - sec;
-      setMinuteCountdown(remaining);
+      const nowMs = Date.now() + serverOffsetMs;
+      const fallbackNext = Math.floor(nowMs / 60000) * 60000 + 60000;
+      const nextMs = nextUpdateAtMs ?? fallbackNext;
+      setCountdownSec(Math.max(0, Math.ceil((nextMs - nowMs) / 1000)));
+
+      const latest1mTs = Number(latest?.latest?.['1m']?.ts);
+      if (Number.isFinite(latest1mTs) && latest1mTs > 0) {
+        const lastCloseMs = (latest1mTs + 60) * 1000;
+        setLastUpdateAgeSec(Math.max(0, Math.round((nowMs - lastCloseMs) / 1000)));
+      } else {
+        setLastUpdateAgeSec(null);
+      }
     };
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [serverOffsetMs]);
+  }, [latest, nextUpdateAtMs, serverOffsetMs]);
 
+  // Auto-refresh chart data near 1m boundaries
   useEffect(() => {
     if (!chartTf) return;
     let cancelled = false;
     let timer: number | undefined;
 
-    const msUntilNextMinute = (nowMs: number) => {
-      const next = Math.floor(nowMs / 60000) * 60000 + 60000;
-      return next - nowMs;
-    };
-
     const tick = async () => {
+      const data = await refreshLatestUI();
+
       try {
-        await refreshLatestUI();
         const c = await fetchCandles(chartTf, 5000);
         if (!cancelled) setCandles(c.candles ?? []);
       } catch {
         // ignore
       }
+
       if (cancelled) return;
-      const now = Date.now() + serverOffsetMs;
-      const delay = msUntilNextMinute(now) + 700;
-      timer = window.setTimeout(tick, delay);
+
+      const nowMs = Date.now() + serverOffsetMs;
+      const fallbackNext = Math.floor(nowMs / 60000) * 60000 + 60000;
+
+      const latest1mTs = Number(data?.latest?.['1m']?.ts);
+      const nextMs =
+        (Number.isFinite(latest1mTs) && latest1mTs > 0) ? (latest1mTs + 120) * 1000 : fallbackNext;
+
+      const delayMs = Math.max(2000, nextMs - nowMs + 700);
+      timer = window.setTimeout(tick, delayMs);
     };
 
     tick();
@@ -168,121 +265,175 @@ export default function App() {
     };
   }, [chartTf, serverOffsetMs]);
 
-  const regime = rec?.regime;
-  const plan = rec?.plan;
-  const selected = rec?.selected;
-  const hasPlan = Boolean(plan?.entry_price);
-  const notes: string[] = Array.isArray(rec?.notes) ? rec.notes : [];
-  const candidates = useMemo(() => (Array.isArray(rec?.candidates) ? rec.candidates : []), [rec]);
+  const updateBadge = (() => {
+    if (lastUpdateAgeSec === null) return { label: 'NO DATA', cls: 'badge' };
+    if (lastUpdateAgeSec <= 15) return { label: 'LIVE', cls: 'badge badgeLive' };
+    if (lastUpdateAgeSec <= 90) return { label: 'DELAY', cls: 'badge badgeWarn' };
+    return { label: 'STALE', cls: 'badge badgeDanger' };
+  })();
 
   return (
     <>
-      <header>
-        <div className="wrap">
-          <div className="title">진입 가격 추천 (차트 UI · LONG/SHORT 선택)</div>
-          <div className="muted">
-            1D 레짐(SMA200) + 30m/60m/180m 진입 용이성 점수로 TF 1개를 고른 뒤, Entry/Stop/TP/배율을 제안합니다.
+      <header className="topBar">
+        <div className="wrap topBarInner">
+          <div className="brand">
+            <div className="brandTitle">Wonyodd Reco</div>
+            <div className="muted brandSub">
+              1D 레짐 + 30m/60m/180m 후보 중 “지금 진입이 쉬운 TF”를 고르고 Entry/Stop/TP를 제안합니다.
+            </div>
+          </div>
+
+          <div className="topControls">
+            <div className="segmented">
+              <button
+                className={`segBtn ${side === 'long' ? 'segBtnActiveLong' : ''}`}
+                onClick={() => {
+                  setSide('long');
+                  runRecommend('long');
+                }}
+                disabled={busy}
+              >
+                LONG
+              </button>
+              <button
+                className={`segBtn ${side === 'short' ? 'segBtnActiveShort' : ''}`}
+                onClick={() => {
+                  setSide('short');
+                  runRecommend('short');
+                }}
+                disabled={busy}
+              >
+                SHORT
+              </button>
+            </div>
+
+            <div className="inputGroup">
+              <div className="muted inputLabel">리스크(%)</div>
+              <input
+                className="numInput"
+                type="number"
+                step={0.05}
+                min={0.05}
+                max={2}
+                value={riskPct}
+                onChange={(e) => setRiskPct(Number(e.target.value))}
+                disabled={busy}
+              />
+            </div>
+
+            <button className="btn btnPrimary" onClick={() => runRecommend(side)} disabled={busy}>
+              {busy ? '계산 중...' : '추천 계산'}
+            </button>
+
+            <button className="btn" onClick={sendDiscord} disabled={busy || !hasPlan}>
+              디스코드 전송
+            </button>
+
+            <div className="fontControls">
+              <button className="btn btnTiny" onClick={() => setFontBasePx((v) => clampInt(v - 1, 14, 20))}>
+                A-
+              </button>
+              <div className="muted fontValue">{fontBasePx}px</div>
+              <button className="btn btnTiny" onClick={() => setFontBasePx((v) => clampInt(v + 1, 14, 20))}>
+                A+
+              </button>
+              <button className="btn btnTiny" onClick={() => setFontBasePx(16)}>
+                Reset
+              </button>
+            </div>
+
+            <button className="btn" onClick={() => openGlossary()}>
+              용어사전
+            </button>
           </div>
         </div>
       </header>
 
-      <div className="wrap">
-        <div className="row" style={{ marginBottom: 12, alignItems: 'center' }}>
-          <button
-            className={`btn ${side === 'long' ? 'btnPrimary' : ''}`}
-            onClick={() => {
-              setSide('long');
-              runRecommend('long');
-            }}
-            disabled={busy}
-          >
-            LONG
-          </button>
-          <button
-            className={`btn ${side === 'short' ? 'btnPrimary' : ''}`}
-            onClick={() => {
-              setSide('short');
-              runRecommend('short');
-            }}
-            disabled={busy}
-          >
-            SHORT
-          </button>
-
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span className="muted">리스크(%)</span>
-            <input
-              type="number"
-              step={0.05}
-              min={0.05}
-              max={2}
-              value={riskPct}
-              onChange={(e) => setRiskPct(Number(e.target.value))}
-              style={{ width: 90 }}
-              disabled={busy}
-            />
-            <button className="btn" onClick={() => runRecommend(side)} disabled={busy}>
-              다시 계산
-            </button>
-            <button className="btn" onClick={sendDiscord} disabled={busy}>
-              디스코드 전송
-            </button>
+      <main className="wrap">
+        <div className="statusRow">
+          <div className="statusItem">
+            <span className={updateBadge.cls}>{updateBadge.label}</span>
+            <span className="muted">
+              다음 업데이트 {fmtCountdown(countdownSec)} (1m)
+              {lastUpdateAgeSec !== null ? ` · 마지막 수신 ${lastUpdateAgeSec}s 전` : ''}
+            </span>
           </div>
 
-          <div className="muted" style={{ marginLeft: 'auto' }}>
+          <div className="statusItem muted" style={{ marginLeft: 'auto' }}>
             {latest?.latest ? (
               <>
-                1m: {fmtTs(latest.latest['1m']?.ts)} · 5m: {fmtTs(latest.latest['5m']?.ts)} · 15m: {fmtTs(latest.latest['15m']?.ts)} · 1D: {fmtTs(latest.latest['1D']?.ts)} · 30m: {fmtTs(latest.latest['30m']?.ts)} · 60m:{' '}
-                {fmtTs(latest.latest['60m']?.ts)} · 180m: {fmtTs(latest.latest['180m']?.ts)}
+                1m {fmtTs(latest.latest['1m']?.ts)} · 30m {fmtTs(latest.latest['30m']?.ts)} · 60m {fmtTs(latest.latest['60m']?.ts)} · 180m{' '}
+                {fmtTs(latest.latest['180m']?.ts)}
               </>
             ) : (
               '데이터 상태: -'
             )}
           </div>
         </div>
-        <div className="muted" style={{ marginBottom: 8 }}>
-          다음 1분봉까지: <b>{minuteCountdown}s</b>
-        </div>
-        {notifyMsg ? <div className="muted" style={{ marginBottom: 8 }}>알림: {notifyMsg}</div> : null}
 
-        <div className="grid2">
-          <div className="card">
-            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+        {notifyMsg ? <div className="toast">{notifyMsg}</div> : null}
+        {err ? <div className="toast toastError">오류: {err}</div> : null}
+
+        <div className="layoutGrid">
+          <section className="panel">
+            <div className="panelHeader">
               <div>
-                <div style={{ fontSize: 16, fontWeight: 650 }}>차트</div>
-                <div className="muted">
-                  선택 TF: <b>{selectedTf ?? '-'}</b>
-                  {regime?.bias ? <span className="pill">1D {regime.bias}</span> : null}
-                  {regime?.confidence !== undefined ? <span className="pill">conf {regime.confidence}</span> : null}
+                <div className="panelTitle">Chart</div>
+                <div className="muted panelSub">
+                  TF <b>{selectedTf}</b>
+                  {regime?.bias ? (
+                    <span className="pill">
+                      <Term label={`Regime: ${regime.bias}`} term="Regime" />
+                    </span>
+                  ) : null}
+                  {regime?.confidence !== undefined ? (
+                    <span className="pill">
+                      <Term label={`conf ${regime.confidence}`} term="Conf" />
+                    </span>
+                  ) : null}
                 </div>
               </div>
-              {busy ? <span className="muted">계산 중…</span> : null}
+
+              <div className="priceHeader">
+                <div className="priceNow">{fmt(lastPrice)}</div>
+                {priceDeltaPct !== null ? (
+                  <div className={`priceDelta ${priceDeltaPct >= 0 ? 'up' : 'down'}`}>
+                    {priceDeltaPct >= 0 ? '+' : ''}
+                    {fmtPct(priceDeltaPct, 2)}
+                  </div>
+                ) : null}
+              </div>
             </div>
 
-            <div className="chartBox" style={{ marginTop: 10 }}>
+            <div className="chartBox">
               <PriceChart candles={candles} scenario={hasPlan ? scenario : null} />
             </div>
-            <div className="muted" style={{ marginTop: 10 }}>
+
+            <div className="muted panelFoot">
               {hasPlan
-                ? '차트 위 점선: Entry/Stop/TP1/TP2 · 가이드 라인: (현재가 → Entry → TP1)'
-                : '추천 전: 현재 가격만 표시됩니다.'}
+                ? '추천 후: Entry/Stop/TP 라인이 표시됩니다. (SMA5/SMA200은 항상 표시)'
+                : '추천 전: 현재 가격과 SMA 라인만 표시됩니다. LONG/SHORT를 눌러 추천을 생성하세요.'}
             </div>
 
-            <div className="kpiGrid" style={{ marginTop: 12 }}>
+            <div className="kpiGrid">
               <div className="kpi">
-                <div className="muted">상태</div>
+                <div className="muted">
+                  <Term label="상태" term="Score" />
+                </div>
                 <div className={`kpiValue ${selected?.status === 'ready' ? 'ok' : 'wait'}`}>
                   {selected?.status?.toUpperCase?.() ?? '-'}
                 </div>
               </div>
               <div className="kpi">
-                <div className="muted">신뢰도</div>
-                <div className="kpiValue">
-                  {selected?.confidence !== undefined ? `${selected.confidence}` : '-'}
+                <div className="muted">
+                  <Term label="신뢰도" term="Conf" />
                 </div>
+                <div className="kpiValue">{selected?.confidence !== undefined ? `${selected.confidence}` : '-'}</div>
               </div>
               <div className="kpi">
-                <div className="muted">ATR%</div>
+                <div className="muted">
+                  <Term label="ATR%" term="ATR%" />
+                </div>
                 <div className="kpiValue">{fmtPct(selected?.atr_pct, 3)}</div>
               </div>
               <div className="kpi">
@@ -292,147 +443,132 @@ export default function App() {
                 </div>
               </div>
             </div>
-          </div>
+          </section>
 
-          <div className="card">
-            <div style={{ fontSize: 16, fontWeight: 650 }}>추천 플랜</div>
-            <div className="muted" style={{ marginTop: 6 }}>
-              {regime?.last_close !== undefined && regime?.sma200 !== undefined ? (
-                <>1D close={fmt(regime.last_close)} / SMA200={fmt(regime.sma200)}</>
-              ) : (
-                '1D 레짐 데이터가 부족하면 추천이 보수적으로 바뀔 수 있습니다.'
-              )}
+          <aside className="panel">
+            <div className="panelHeader">
+              <div>
+                <div className="panelTitle">Recommendation</div>
+                <div className="muted panelSub">
+                  {hasPlan ? (
+                    <>
+                      방향 <b>{plan?.side?.toUpperCase?.()}</b> · TF <b>{plan?.tf}</b>
+                    </>
+                  ) : (
+                    <>LONG/SHORT 버튼을 누르면 Entry/Stop/TP가 표시됩니다.</>
+                  )}
+                </div>
+              </div>
             </div>
+
             {notes.length > 0 ? (
-              <div className="notice" style={{ marginTop: 10 }}>
+              <div className="notice">
                 {notes.map((n, i) => (
                   <div key={`${n}-${i}`}>• {n}</div>
                 ))}
               </div>
             ) : null}
 
-            {err ? (
-              <div className="muted" style={{ marginTop: 10 }}>
-                오류: {err}
-              </div>
-            ) : null}
-
-            {hasPlan ? (
-              <div style={{ marginTop: 10 }}>
-                <table>
-                  <tbody>
-                    <tr>
-                      <th>방향</th>
-                      <td>
-                        <b>{plan?.side?.toUpperCase?.() ?? '-'}</b>
-                      </td>
-                    </tr>
-                    <tr>
-                      <th>TF</th>
-                      <td>
-                        <b>{plan?.tf ?? '-'}</b>
-                      </td>
-                    </tr>
-                    <tr>
-                      <th>Entry</th>
-                      <td>
-                        <b>{fmt(plan?.entry_price)}</b> <span className="muted">({plan?.entry_type})</span>
-                      </td>
-                    </tr>
-                    <tr>
-                      <th>Stop</th>
-                      <td>
-                        <b>{fmt(plan?.stop_price)}</b> <span className="muted">(ATR×{plan?.params?.stop_atr_mult})</span>
-                      </td>
-                    </tr>
-                    <tr>
-                      <th>TP1</th>
-                      <td>
-                        <b>{fmt(plan?.tp1_price)}</b> <span className="muted">(SMA5 회복)</span>
-                      </td>
-                    </tr>
-                    <tr>
-                      <th>TP2/TP3</th>
-                      <td>
-                        <b>{fmt(plan?.tp2_price)}</b> / <b>{fmt(plan?.tp3_price)}</b> <span className="muted">(RR 기반)</span>
-                      </td>
-                    </tr>
-                    <tr>
-                      <th>손절폭</th>
-                      <td>{plan?.stop_distance_pct ?? '-'}%</td>
-                    </tr>
-                    <tr>
-                      <th>진입 거리</th>
-                      <td>{plan?.entry_distance_pct ?? '-'}%</td>
-                    </tr>
-                    <tr>
-                      <th>권장 최대 배율</th>
-                      <td>
-                        <b>{plan?.max_leverage_by_risk ?? '-'}</b>x <span className="muted">(리스크 {plan?.risk_pct ?? '-'}%)</span>
-                      </td>
-                    </tr>
-                    <tr>
-                      <th>R:R(대략)</th>
-                      <td>
-                        {plan?.reward_risk_to_tp1 ?? '-'} <span className="muted">(TP1)</span>{' '}
-                        {plan?.reward_risk_to_tp2 !== undefined ? (
-                          <>
-                            · {plan.reward_risk_to_tp2} <span className="muted">(TP2)</span>
-                          </>
-                        ) : null}
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="muted" style={{ marginTop: 10 }}>
-                LONG/SHORT 버튼을 누르면 Entry/Stop/TP가 표시됩니다.
-              </div>
-            )}
-
             {hasPlan ? (
               <>
-                <div className="muted" style={{ marginTop: 10 }}>
-                  청산 룰: {plan?.tp_rule ?? '-'}
+                <div className="priceGrid">
+                  <div className="priceCard">
+                    <div className="muted">
+                      <Term label="Entry" term="ATR(14)" /> <span className="muted">({plan?.entry_type})</span>
+                    </div>
+                    <div className="priceValue">{fmt(plan?.entry_price)}</div>
+                    <div className="muted">
+                      k={plan?.params?.entry_atr_k ?? '-'} · 거리 {plan?.entry_distance_pct ?? '-'}%
+                    </div>
+                  </div>
+
+                  <div className="priceCard">
+                    <div className="muted">
+                      <Term label="Stop" term="ATR(14)" />
+                    </div>
+                    <div className="priceValue">{fmt(plan?.stop_price)}</div>
+                    <div className="muted">
+                      ATR x {plan?.params?.stop_atr_mult ?? '-'} · {plan?.stop_distance_pct ?? '-'}%
+                    </div>
+                  </div>
+
+                  <div className="priceCard">
+                    <div className="muted">
+                      <Term label="TP1" term="SMA5" />
+                    </div>
+                    <div className="priceValue">{fmt(plan?.tp1_price)}</div>
+                    <div className="muted">
+                      <Term label="R:R" term="R:R" /> {plan?.reward_risk_to_tp1 ?? '-'}
+                    </div>
+                  </div>
                 </div>
-                <div className="muted" style={{ marginTop: 6 }}>
-                  베스트 파라미터: {rec?.best_params?.entry_mode ?? '-'} / k={rec?.best_params?.entry_k ?? '-'} / stop={rec?.best_params?.stop_mult ?? '-'}
+
+                <div className="planMeta">
+                  <div className="metaRow">
+                    <span className="muted">TP2/TP3</span>
+                    <span>
+                      <b>{fmt(plan?.tp2_price)}</b> / <b>{fmt(plan?.tp3_price)}</b>
+                    </span>
+                  </div>
+                  <div className="metaRow">
+                    <span className="muted">권장 최대 배율</span>
+                    <span>
+                      <b>{plan?.max_leverage_by_risk ?? '-'}</b>x <span className="muted">(리스크 {plan?.risk_pct ?? '-'}%)</span>
+                    </span>
+                  </div>
+                  <div className="metaRow">
+                    <span className="muted">청산 룰</span>
+                    <span>{plan?.tp_rule ?? '-'}</span>
+                  </div>
                 </div>
               </>
             ) : null}
-          </div>
+          </aside>
         </div>
 
         {hasPlan ? (
-          <div className="card" style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 16, fontWeight: 650 }}>TF 후보 점수</div>
-            <div className="muted" style={{ marginTop: 6 }}>
-              entry_ease_score가 높은 TF가 우선이며, 상위 후보는 최근 백테스트 점수(수익/MDD 균형)로 2차 선별합니다.
+          <section className="panel" style={{ marginTop: '1rem' }}>
+            <div className="panelHeader">
+              <div>
+                <div className="panelTitle">Timeframe Ranking</div>
+                <div className="muted panelSub">TF 후보 점수(진입 용이성 + 백테스트 + 레짐 + 변동성)</div>
+              </div>
             </div>
 
-            <div style={{ marginTop: 10, overflow: 'auto' }}>
-              <table>
+            <div style={{ overflow: 'auto' }}>
+              <table className="table">
                 <thead>
                   <tr>
                     <th>TF</th>
-                    <th>Score</th>
-                    <th>Comp</th>
-                    <th>Conf</th>
-                    <th>BT</th>
+                    <th>
+                      <Term label="Score" term="Score" />
+                    </th>
+                    <th>
+                      <Term label="Comp" term="Comp" />
+                    </th>
+                    <th>
+                      <Term label="Conf" term="Conf" />
+                    </th>
+                    <th>
+                      <Term label="BT" term="BT" />
+                    </th>
                     <th>Signal</th>
                     <th>Close</th>
-                    <th>SMA5</th>
-                    <th>RSI2</th>
-                    <th>ATR%</th>
+                    <th>
+                      <Term label="SMA5" term="SMA5" />
+                    </th>
+                    <th>
+                      <Term label="RSI2" term="RSI(2)" />
+                    </th>
+                    <th>
+                      <Term label="ATR%" term="ATR%" />
+                    </th>
                     <th>Next</th>
                   </tr>
                 </thead>
                 <tbody>
-                {candidates.map((c: any) => (
-                  <tr key={c.tf}
-                    style={c.tf === rec?.plan?.tf ? { background: '#0b0f19' } : undefined}
-                  >
+                  {candidates.map((c: any) => (
+                    <tr key={c.tf} className={c.tf === rec?.plan?.tf ? 'rowActive' : ''}>
                       <td>
                         <b>{c.tf}</b>
                       </td>
@@ -440,11 +576,8 @@ export default function App() {
                       <td>{c.composite_score ?? '-'}</td>
                       <td>{c.confidence ?? '-'}</td>
                       <td>
-                        <div className="barWrap">
-                          <div
-                            className="barFill"
-                            style={{ width: `${Math.round((Number(c.backtest_score_norm) || 0) * 100)}%` }}
-                          />
+                        <div className="barWrap" title="최근 백테스트 점수(정규화)">
+                          <div className="barFill" style={{ width: `${Math.round((Number(c.backtest_score_norm) || 0) * 100)}%` }} />
                         </div>
                       </td>
                       <td>{c.trigger_now ? 'READY' : 'WAIT'}</td>
@@ -458,9 +591,12 @@ export default function App() {
                 </tbody>
               </table>
             </div>
-          </div>
+          </section>
         ) : null}
-      </div>
+      </main>
+
+      <GlossaryModal open={glossaryOpen} initialQuery={glossaryQuery} onClose={() => setGlossaryOpen(false)} />
     </>
   );
 }
+

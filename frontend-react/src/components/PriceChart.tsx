@@ -22,7 +22,7 @@ export default function PriceChart({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const candleSeriesRef = useRef<ISeriesApi<'Bar'> | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const pathSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const sma5SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const sma200SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
@@ -36,6 +36,13 @@ export default function PriceChart({
         high: c.high,
         low: c.low,
         close: c.close,
+        ...(c.is_partial
+          ? {
+              color: '#2d86ff',
+              borderColor: '#2d86ff',
+              wickColor: '#2d86ff',
+            }
+          : {}),
       })),
     [candles],
   );
@@ -84,9 +91,13 @@ export default function PriceChart({
       height: el.clientHeight,
     });
 
-    const candleSeries = chart.addBarSeries({
+    const candleSeries = chart.addCandlestickSeries({
       upColor: '#26a69a',
       downColor: '#ef5350',
+      wickUpColor: '#26a69a',
+      wickDownColor: '#ef5350',
+      borderUpColor: '#26a69a',
+      borderDownColor: '#ef5350',
     });
 
     const pathSeries = chart.addLineSeries({

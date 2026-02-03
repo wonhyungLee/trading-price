@@ -10,6 +10,8 @@ from typing import Any, Dict, Optional, Tuple
 
 from .config import DISCORD_WEBHOOK_URL, DISCORD_WEBHOOK_FILE
 
+TRADING_SITE_URL = "http://trading.p-e.kr"
+
 def _read_webhook_from_file(path: Path) -> Optional[str]:
     if not path.exists():
         return None
@@ -59,6 +61,14 @@ def _fmt_num(x: Any, digits: int = 2) -> str:
         return f"{n:,.{digits}f}"
     except Exception:
         return str(x)
+
+def _append_site_link(content: Optional[str]) -> str:
+    base = (content or "").strip()
+    if TRADING_SITE_URL in base:
+        return base
+    if not base:
+        return TRADING_SITE_URL
+    return f"{base}\n{TRADING_SITE_URL}"
 
 def build_discord_message(
     rec: Dict[str, Any],
@@ -124,6 +134,7 @@ def build_discord_message(
     }
     if content is None:
         content = "추천 업데이트"
+    content = _append_site_link(content)
     return {"content": content, "embeds": [embed]}
 
 def send_discord_webhook(message: Dict[str, Any]) -> Tuple[bool, str]:

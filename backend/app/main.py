@@ -89,15 +89,22 @@ def _choose_auto_side(rec_long: dict, rec_short: dict) -> str:
         return "short"
     return "long"
 
-def _maybe_notify_spike(tf: str, ts: int, payload: WebhookPayload) -> None:
+def _maybe_notify_spike(
+    tf: str,
+    ts: int,
+    payload: WebhookPayload,
+    *,
+    force_bar_close: bool = False,
+    ignore_tf_filter: bool = False,
+) -> None:
     if not SPIKE_NOTIFY_ENABLED:
         return
 
     enabled_tfs = _parse_tf_list(SPIKE_NOTIFY_TFS)
-    if enabled_tfs and tf not in enabled_tfs:
+    if enabled_tfs and tf not in enabled_tfs and not ignore_tf_filter:
         return
 
-    if SPIKE_NOTIFY_ONLY_BAR_CLOSE and not _is_bar_close(payload):
+    if SPIKE_NOTIFY_ONLY_BAR_CLOSE and not (force_bar_close or _is_bar_close(payload)):
         return
 
     ctx = detect_volume_volatility_spike(tf, ts)
@@ -156,7 +163,7 @@ def _maybe_notify_spike(tf: str, ts: int, payload: WebhookPayload) -> None:
         if ok:
             db.insert_notification(kind, tf, ts, created_ts=now, detail=json.dumps({"ctx": ctx, "detail": detail}, ensure_ascii=False))
 
-def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload) -> None:
+def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_close: bool = False) -> None:
     if not READY_NOTIFY_ENABLED:
         return
 
@@ -164,7 +171,7 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload) -> None:
     if enabled_tfs and tf not in enabled_tfs:
         return
 
-    if READY_NOTIFY_ONLY_BAR_CLOSE and not _is_bar_close(payload):
+    if READY_NOTIFY_ONLY_BAR_CLOSE and not (force_bar_close or _is_bar_close(payload)):
         return
 
     side_mode = str(READY_NOTIFY_SIDE or "both").strip().lower()
@@ -265,16 +272,17 @@ def _is_ts_aligned(ts: int, tf: str) -> bool:
         return True
     return (ts % tf_sec == 0) or ((ts + tf_sec) % tf_sec == 0)
 
-def _resample_from_lower_tf(tf: str, ts: int) -> None:
+def _resample_from_lower_tf(tf: str, ts: int) -> list[tuple[str, int]]:
     if not RESAMPLE_FROM_LOWER_TF:
-        return
+        return []
     if tf not in ("1m", "5m", "15m"):
-        return
+        return []
 
     tf_sec_map = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600, "180m": 10800}
     src_sec = tf_sec_map[tf]
     targets = ("30m", "60m", "180m")
 
+    resampled: list[tuple[str, int]] = []
     for tgt in targets:
         tgt_sec = tf_sec_map[tgt]
         if tgt_sec % src_sec != 0:
@@ -298,6 +306,8 @@ def _resample_from_lower_tf(tf: str, ts: int) -> None:
 
         db.upsert_candle(tgt, start_ts, o, h, l, c, v, features=None)
         print(f"[DEBUG] Resampled {tgt} @ {start_ts} from {tf} ({len(rows)} bars)")
+        resampled.append((tgt, start_ts))
+    return resampled
 
 def _partial_candle_from_1m(tf_norm: str) -> Optional[dict]:
     if not INCLUDE_PARTIAL_BARS:
@@ -366,15 +376,28 @@ async def tradingview_webhook(req: Request):
         float(payload.volume) if payload.volume is not None else None,
         features=payload.features,
     )
-    _resample_from_lower_tf(tf, ts)
+    resampled = _resample_from_lower_tf(tf, ts)
     try:
-        _maybe_notify_spike(tf, ts, payload)
+        is_1m = (tf == "1m")
+        _maybe_notify_spike(
+            tf,
+            ts,
+            payload,
+            force_bar_close=is_1m,
+            ignore_tf_filter=is_1m,
+        )
     except Exception as e:
         print(f"[WARN] Spike notify error: {type(e).__name__}: {e}")
     try:
         _maybe_notify_ready(tf, ts, payload)
     except Exception as e:
         print(f"[WARN] Ready notify error: {type(e).__name__}: {e}")
+    if resampled:
+        for res_tf, res_ts in resampled:
+            try:
+                _maybe_notify_ready(res_tf, res_ts, payload, force_bar_close=True)
+            except Exception as e:
+                print(f"[WARN] Ready notify error (resampled {res_tf}): {type(e).__name__}: {e}")
 
     return {"ok": True, "timeframe": tf, "ts": ts}
 

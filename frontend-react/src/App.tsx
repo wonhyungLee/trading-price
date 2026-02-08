@@ -545,7 +545,17 @@ export default function App() {
               </div>
 
               <div className="priceHeader">
-                <div className="priceNow">{fmt(lastPrice)}</div>
+                <div className="priceTopRow">
+                  <div className="priceNow">{fmt(lastPrice)}</div>
+                  <a
+                    className="btn discordCtaMobile"
+                    href="https://discord.gg/cAPcXQh7K"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    디스코드 알람받기
+                  </a>
+                </div>
                 {priceDeltaPct !== null ? (
                   <div className={`priceDelta ${priceDeltaPct >= 0 ? 'up' : 'down'}`}>
                     {priceDeltaPct >= 0 ? '+' : ''}

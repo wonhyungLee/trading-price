@@ -176,6 +176,26 @@ a {
   font-size: 0.88rem;
 }
 
+.discordCtaMobile {
+  display: none;
+  align-items: center;
+  padding: 0.32rem 0.55rem;
+  border-radius: 10px;
+  border: 1px solid var(--border2);
+  background: rgba(20, 28, 47, 0.92);
+  color: var(--text);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.15px;
+  text-decoration: none;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(8px);
+}
+
+.discordCtaMobile:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .fontControls {
   display: flex;
   align-items: center;
@@ -296,6 +316,12 @@ a {
 
 .priceHeader {
   text-align: right;
+}
+
+.priceTopRow {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
 }
 
 .priceNow {
@@ -715,6 +741,10 @@ a {
 
   .chartBox {
     height: clamp(280px, 48vh, 420px);
+  }
+
+  .discordCtaMobile {
+    display: inline-flex;
   }
 
   .barWrap {

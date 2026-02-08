@@ -1,9 +1,22 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { fetchCandles, fetchLatest, fetchRecommend, notifyRecommend, type Candle, type Scenario } from './api';
 import PriceChart from './components/PriceChart';
 import GlossaryModal from './components/GlossaryModal';
 
 type Side = 'long' | 'short';
+
+const BANNER_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const BANNER_COOLDOWN_KEY = 'cpb_cooldown_until';
+
+function readBannerCooldown(): number {
+  try {
+    const raw = localStorage.getItem(BANNER_COOLDOWN_KEY);
+    const parsed = raw ? Number(raw) : 0;
+    return Number.isFinite(parsed) ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
 
 function fmt(x: any): string {
   const n = Number(x);
@@ -67,6 +80,11 @@ export default function App() {
   const [glossaryOpen, setGlossaryOpen] = useState(false);
   const [glossaryQuery, setGlossaryQuery] = useState<string>('');
 
+  const [bannerOpen, setBannerOpen] = useState(false);
+  const [bannerCooldownUntil, setBannerCooldownUntil] = useState<number>(() => readBannerCooldown());
+  const bannerGridRef = useRef<HTMLDivElement | null>(null);
+  const bannerSubtitleRef = useRef<HTMLParagraphElement | null>(null);
+
   const [fontBasePx, setFontBasePx] = useState<number>(() => {
     try {
       const v = localStorage.getItem('wonyodd_font_base_px');
@@ -95,6 +113,22 @@ export default function App() {
   function openGlossary(term?: string) {
     setGlossaryQuery(term ?? '');
     setGlossaryOpen(true);
+  }
+
+  function startBannerCooldown() {
+    const until = Date.now() + BANNER_COOLDOWN_MS;
+    setBannerCooldownUntil(until);
+    try {
+      localStorage.setItem(BANNER_COOLDOWN_KEY, String(until));
+    } catch {
+      // ignore
+    }
+    setBannerOpen(false);
+  }
+
+  function openBannerIfAllowed() {
+    if (Date.now() < bannerCooldownUntil) return;
+    setBannerOpen(true);
   }
 
   function Term({ label, term }: { label: string; term: string }) {
@@ -202,6 +236,37 @@ export default function App() {
     }
   }, [fontBasePx]);
 
+  useEffect(() => {
+    if (!bannerOpen) return;
+    const cpb = (window as any).CoupangPartnersBanner;
+    if (!cpb?.load) return;
+    const apiBase = (import.meta as any).env?.VITE_API_BASE ?? '';
+    cpb.load({
+      container: bannerGridRef.current,
+      subtitle: bannerSubtitleRef.current,
+      endpoint: `${apiBase}/api/coupang-banner`,
+      defaultSubtitle: '지금 필요한 정리/금융 아이템을 추천합니다.',
+      emptyMessage: '추천 상품을 불러오지 못했습니다.',
+    });
+  }, [bannerOpen]);
+
+  useEffect(() => {
+    if (!bannerOpen) return;
+    const container = bannerGridRef.current;
+    if (!container) return;
+
+    const handleClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      const card = target?.closest?.('.cpb-card');
+      if (card) {
+        startBannerCooldown();
+      }
+    };
+
+    container.addEventListener('click', handleClick);
+    return () => container.removeEventListener('click', handleClick);
+  }, [bannerOpen, bannerCooldownUntil]);
+
   // Initial load
   useEffect(() => {
     refreshLatestUI();
@@ -299,6 +364,59 @@ export default function App() {
 
   return (
     <>
+      {bannerOpen ? (
+        <div className="cpbOverlay" role="dialog" aria-modal="true" aria-label="추천 상품 배너">
+          <div className="cpbModal">
+            <button
+              className="cpbClose"
+              onClick={(e) => {
+                e.stopPropagation();
+                const firstCard = bannerGridRef.current?.querySelector('.cpb-card') as HTMLAnchorElement | null;
+                const href = firstCard?.getAttribute?.('href');
+                if (href) {
+                  window.open(href, '_blank', 'noopener');
+                }
+                startBannerCooldown();
+              }}
+              aria-label="닫기"
+            >
+              ×
+            </button>
+            <div className="cpbHeader">
+              <div className="cpbTitle">추천 상품</div>
+              <p className="cpbSubtitle" ref={bannerSubtitleRef}>
+                방문자 관심 로그를 반영해 필요한 상품을 추천합니다.
+              </p>
+            </div>
+            <div className="cpb-grid cpbGrid" ref={bannerGridRef}>
+              <div className="cpb-card cpb-card--skeleton">
+                <div className="cpb-thumb"></div>
+                <div className="cpb-lines">
+                  <span></span>
+                  <span></span>
+                </div>
+              </div>
+              <div className="cpb-card cpb-card--skeleton">
+                <div className="cpb-thumb"></div>
+                <div className="cpb-lines">
+                  <span></span>
+                  <span></span>
+                </div>
+              </div>
+              <div className="cpb-card cpb-card--skeleton">
+                <div className="cpb-thumb"></div>
+                <div className="cpb-lines">
+                  <span></span>
+                  <span></span>
+                </div>
+              </div>
+            </div>
+            <p className="cpbDisclosure">
+              이 포스팅은 쿠팡파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
+            </p>
+          </div>
+        </div>
+      ) : null}
       <header className="topBar">
         <div className="wrap topBarInner">
           <div className="brand">
@@ -314,6 +432,7 @@ export default function App() {
                 className={`segBtn ${side === 'long' ? 'segBtnActiveLong' : ''}`}
                 onClick={() => {
                   setSide('long');
+                  openBannerIfAllowed();
                   runRecommend('long');
                 }}
                 disabled={busy}
@@ -324,6 +443,7 @@ export default function App() {
                 className={`segBtn ${side === 'short' ? 'segBtnActiveShort' : ''}`}
                 onClick={() => {
                   setSide('short');
+                  openBannerIfAllowed();
                   runRecommend('short');
                 }}
                 disabled={busy}
@@ -350,9 +470,14 @@ export default function App() {
               {busy ? '계산 중...' : '추천 계산'}
             </button>
 
-            <button className="btn controlDiscord" onClick={sendDiscord} disabled={busy || !hasPlan}>
-              디스코드 전송
-            </button>
+            <a
+              className="btn controlDiscord"
+              href="https://discord.gg/cAPcXQh7K"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              디스코드 알람받기
+            </a>
 
             <div className="fontControls controlFont">
               <button className="btn btnTiny" onClick={() => setFontBasePx((v) => clampInt(v - 1, 14, 20))}>

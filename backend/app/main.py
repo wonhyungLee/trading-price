@@ -32,6 +32,7 @@ from .models import WebhookPayload
 from .recommend import recommend, tf_key
 from .notify import build_discord_message, send_discord_webhook
 from .alerts import detect_volume_volatility_spike
+from .coupang_banner import build_banner_payload, normalize_interest_category, record_interest_category
 
 import json
 
@@ -453,6 +454,35 @@ def latest():
         row = db.fetch_latest(tf)
         out[tf] = {"ts": int(row["ts"]), "close": float(row["close"])} if row else None
     return {"ok": True, "latest": out}
+
+@app.get("/api/coupang-banner")
+def coupang_banner(keyword: Optional[str] = None, category: Optional[str] = None, limit: int = 3):
+    try:
+        payload = build_banner_payload(
+            keyword_override=keyword,
+            category_override=category,
+            limit=limit,
+        )
+        return JSONResponse(payload)
+    except Exception:
+        return JSONResponse({"message": "배너를 불러오지 못했습니다."}, status_code=500)
+
+@app.post("/api/ad-interest")
+async def ad_interest(req: Request):
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"message": "잘못된 요청입니다."}, status_code=400)
+
+    category = normalize_interest_category((body or {}).get("category"))
+    if not category:
+        return JSONResponse({"message": "잘못된 카테고리입니다."}, status_code=400)
+
+    try:
+        record_interest_category(category)
+        return {"success": True}
+    except Exception:
+        return {"success": False}
 
 # Serve frontend (static) AFTER API routes so /api/* wins.
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

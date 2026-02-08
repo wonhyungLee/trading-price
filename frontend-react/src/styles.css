@@ -172,6 +172,10 @@ a {
   font-weight: 650;
 }
 
+.controlDiscord {
+  font-size: 0.88rem;
+}
+
 .fontControls {
   display: flex;
   align-items: center;
@@ -607,7 +611,11 @@ a {
   .topBarInner {
     flex-direction: column;
     align-items: stretch;
-    padding-top: calc(0.9rem + env(safe-area-inset-top));
+    padding-top: calc(0.5rem + env(safe-area-inset-top));
+  }
+
+  .brand {
+    display: none;
   }
 
   .brandSub {
@@ -616,13 +624,8 @@ a {
 
   .topControls {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-areas:
-      "side side"
-      "risk risk"
-      "recommend recommend"
-      "discord glossary"
-      "font font";
+    grid-template-columns: 1fr;
+    grid-template-areas: "side";
     gap: 0.65rem;
     justify-content: stretch;
   }
@@ -650,6 +653,14 @@ a {
   .controlFont {
     grid-area: font;
     justify-content: space-between;
+  }
+
+  .controlRisk,
+  .controlRecommend,
+  .controlDiscord,
+  .controlGlossary,
+  .controlFont {
+    display: none;
   }
 
   .segBtn,
@@ -732,5 +743,133 @@ a {
   .modal {
     width: 100%;
     max-height: 92vh;
+  }
+}
+
+.cpbOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.1rem;
+  background: rgba(3, 6, 12, 0.65);
+  animation: cpbFadeIn 0.2s ease-out;
+}
+
+.cpbModal {
+  position: relative;
+  width: min(860px, 94vw);
+  max-height: 82vh;
+  overflow: auto;
+  padding: 1.1rem 1.1rem 1.3rem;
+  border-radius: 18px;
+  border: 1px solid #d7deee;
+  background: #f7f8fc;
+  color: #1b2333;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  --accent: #1e4ad7;
+  --line: rgba(27, 42, 65, 0.12);
+  display: flex;
+  flex-direction: column;
+  animation: cpbPop 0.22s ease-out;
+}
+
+.cpbHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.7rem;
+  padding-right: 1.2rem;
+}
+
+.cpbTitle {
+  font-size: 1.1rem;
+  font-weight: 800;
+}
+
+.cpbSubtitle {
+  margin: 0;
+  color: #4e5b76;
+  font-size: 0.9rem;
+}
+
+.cpbDisclosure {
+  margin: 0.85rem 0 0;
+  font-size: 0.78rem;
+  color: #6b758a;
+}
+
+.cpbGrid {
+  margin-top: 0.35rem;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.cpbClose {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #111827;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 24px;
+  text-align: center;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  z-index: 2;
+}
+
+.cpbClose:hover {
+  background: #f1f5f9;
+}
+
+@keyframes cpbFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes cpbPop {
+  from {
+    opacity: 0.6;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 720px) {
+  .cpbOverlay {
+    padding: 0.7rem;
+  }
+
+  .cpbModal {
+    width: 100%;
+    max-height: 86vh;
+    padding: 0.9rem 0.9rem 1.1rem;
+    border-radius: 14px;
+  }
+
+  .cpbClose {
+    top: 10px;
+    right: 10px;
+    width: 26px;
+    height: 26px;
+    font-size: 15px;
+    line-height: 26px;
   }
 }

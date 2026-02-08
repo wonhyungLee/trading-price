@@ -29,6 +29,13 @@ CREATE TABLE IF NOT EXISTS notifications (
   PRIMARY KEY (kind, timeframe, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_kind_created ON notifications(kind, created_ts);
+
+CREATE TABLE IF NOT EXISTS ad_interest (
+  category TEXT PRIMARY KEY,
+  count INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_ad_interest_count_updated ON ad_interest(count DESC, updated_at DESC);
 """
 
 def connect() -> sqlite3.Connection:
@@ -135,5 +142,49 @@ def insert_notification(kind: str, timeframe: str, ts: int, created_ts: int, det
         )
         conn.commit()
         return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+def ensure_ad_interest_schema() -> None:
+    conn = connect()
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS ad_interest (
+              category TEXT PRIMARY KEY,
+              count INTEGER NOT NULL DEFAULT 0,
+              updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_ad_interest_count_updated ON ad_interest(count DESC, updated_at DESC);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def record_ad_interest(category: str) -> None:
+    conn = connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO ad_interest (category, count, updated_at)
+            VALUES (?, 1, strftime('%s','now'))
+            ON CONFLICT(category)
+            DO UPDATE SET count = count + 1, updated_at = strftime('%s','now')
+            """,
+            (category,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def fetch_top_interest_category() -> Optional[str]:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            """SELECT category FROM ad_interest ORDER BY count DESC, updated_at DESC LIMIT 1"""
+        )
+        row = cur.fetchone()
+        return row["category"] if row else None
     finally:
         conn.close()

@@ -40,6 +40,8 @@ bash install.sh
 - `WONYODD_VALIDATE_TS_ALIGNMENT`: true면 timeframe 정렬 timestamp만 수용
 - `WONYODD_DISCORD_WEBHOOK_URL`: 디스코드 웹훅 URL(권장)
 - `WONYODD_DISCORD_WEBHOOK_FILE`: 디스코드 웹훅이 들어있는 파일 경로(기본 `개인정보.txt`)
+- `WONYODD_FORWARD_WEBHOOK_URLS`: 추가 전송 대상 JSON 웹훅 URL(쉼표 구분, 다중 등록 가능)
+- `WONYODD_FORWARD_WEBHOOK_TIMEOUT_SEC`: 추가 웹훅 요청 타임아웃(초, 기본 8)
 - `WONYODD_SPIKE_NOTIFY_ENABLED`: true면 “거래량+변동성 스파이크” 발생 시 자동으로 디스코드 알림 전송
 - `WONYODD_SPIKE_NOTIFY_TFS`: 감지할 TF 목록(기본 `30m,60m,180m`)
 - `WONYODD_SPIKE_NOTIFY_SIDE`: 추천 방향(기본 `auto` = long/short 둘 다 계산 후 더 유리한 쪽 선택). `long|short|auto`

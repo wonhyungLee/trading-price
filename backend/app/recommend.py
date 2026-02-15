@@ -22,6 +22,31 @@ TF_MINUTES = {
     "1D": 1440,
 }
 
+READY_RULE_DEFS = [
+    ("C", 0.2, 1.5, 0.90),
+    ("B", 0.3, 1.5, 1.59),
+    ("A", 0.3, None, 1.59),
+    ("D", None, 1.5, 3.98),
+]
+READY_RULE_MDD_FALLBACK = 3.98
+MAX_MDD_LEV_SCALE = 2.0
+BASE_MDD_PERCENT = 3.98
+
+def resolve_ready_rule(distance_pct: float, atr_pct_v: float) -> tuple[str, Optional[float]]:
+    try:
+        distance_value = float(distance_pct)
+        atr_value = float(atr_pct_v)
+    except Exception:
+        return "-", READY_RULE_MDD_FALLBACK
+
+    for rule_name, gap_max, atr_max, mdd_pct in READY_RULE_DEFS:
+        if gap_max is not None and distance_value > gap_max:
+            continue
+        if atr_max is not None and atr_value > atr_max:
+            continue
+        return rule_name, mdd_pct
+    return "-", READY_RULE_MDD_FALLBACK
+
 def tf_key(minutes_or_str: str) -> Optional[str]:
     s = str(minutes_or_str).strip()
     s = s.upper()
@@ -139,11 +164,14 @@ def evaluate_timeframe(tf: str, side: str, regime_bias: str) -> Optional[Dict[st
     score, detail = _ease_score(side, close, float(sma5), float(sma200), float(rsi2), regime_bias)
     atr_pct = (float(atr14) / close * 100.0) if close else 0.0
     vol_ok = (atr_pct >= MIN_ATR_PCT) and (atr_pct <= MAX_ATR_PCT)
+    sma_distance_pct = abs((float(sma5) - close) / close * 100.0) if close else 0.0
 
     now = int(time.time())
     tf_sec = TF_MINUTES[tf] * 60
     next_ts = ts + tf_sec
     time_to_next = max(0, next_ts - now)
+
+    ready_rule, ready_rule_mdd_pct = resolve_ready_rule(sma_distance_pct, atr_pct)
 
     return {
         "tf": tf,
@@ -154,6 +182,9 @@ def evaluate_timeframe(tf: str, side: str, regime_bias: str) -> Optional[Dict[st
         "rsi2": float(rsi2),
         "atr14": float(atr14),
         "atr_pct": round(atr_pct, 4),
+        "sma_distance_pct": round(sma_distance_pct, 4),
+        "ready_rule": ready_rule,
+        "ready_rule_mdd_pct": ready_rule_mdd_pct,
         "vol_ok": bool(vol_ok),
         "entry_ease_score": round(float(score), 2),
         "time_to_next_sec": int(time_to_next),
@@ -260,6 +291,26 @@ def build_plan(candidate: Dict[str, Any], side: str, best_params: Optional[Dict[
     max_lev = min(MAX_LEVERAGE, max_lev)
     max_lev = round(max_lev, 2)
 
+    rule_mdd_pct = candidate.get("ready_rule_mdd_pct")
+    if rule_mdd_pct is None:
+        rule_mdd_pct = READY_RULE_MDD_FALLBACK
+    try:
+        rule_mdd = float(rule_mdd_pct)
+    except Exception:
+        rule_mdd = READY_RULE_MDD_FALLBACK
+
+    if rule_mdd > 0:
+        mdd_scale = BASE_MDD_PERCENT / rule_mdd
+        if not math.isfinite(mdd_scale):
+            mdd_scale = 1.0
+        mdd_scale = max(1.0, min(MAX_MDD_LEV_SCALE, mdd_scale))
+    else:
+        mdd_scale = 1.0
+
+    max_lev_by_mdd = max_lev * mdd_scale
+    max_lev_by_mdd = min(MAX_LEVERAGE, max_lev_by_mdd)
+    max_lev_by_mdd = round(max_lev_by_mdd, 2)
+
     rr = None
     rr2 = None
     if side == "long":
@@ -287,6 +338,9 @@ def build_plan(candidate: Dict[str, Any], side: str, best_params: Optional[Dict[
         "stop_distance_pct": round(stop_pct, 3),
         "entry_distance_pct": round(abs(entry - price) / price * 100.0, 3) if price else None,
         "max_leverage_by_risk": max_lev,
+        "max_leverage_by_mdd": max_lev_by_mdd,
+        "ready_rule": candidate.get("ready_rule"),
+        "ready_rule_mdd_pct": rule_mdd,
         "reward_risk_to_tp1": round(rr, 3) if rr is not None else None,
         "reward_risk_to_tp2": round(rr2, 3) if rr2 is not None else None,
         "params": {"entry_atr_k": k, "stop_atr_mult": stop_mult},

@@ -410,20 +410,25 @@ a {
 
 @media (min-width: 1020px) {
   .priceGrid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
 .priceCard {
-  padding: 0.85rem 0.9rem;
+  padding: 0.55rem 0.7rem;
   border-radius: 14px;
   border: 1px solid var(--border);
   background: var(--panel2);
 }
 
+.priceCard .muted {
+  line-height: 1.25;
+  font-size: 0.84rem;
+}
+
 .priceValue {
-  margin-top: 0.5rem;
-  font-size: 1.55rem;
+  margin-top: 0.35rem;
+  font-size: 1.36rem;
   font-weight: 850;
 }
 
@@ -443,6 +448,12 @@ a {
 
 .metaRow:last-child {
   border-bottom: 0;
+}
+
+.ruleDesc {
+  max-width: 32rem;
+  line-height: 1.45;
+  color: var(--text);
 }
 
 .table {

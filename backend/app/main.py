@@ -1,7 +1,11 @@
 from __future__ import annotations
 import time
 from pathlib import Path
-from typing import Optional
+import threading
+import urllib.error
+import urllib.request
+from urllib.parse import urlencode
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -26,11 +30,19 @@ from .config import (
     READY_NOTIFY_SIDE,
     READY_NOTIFY_ONLY_BAR_CLOSE,
     READY_NOTIFY_COOLDOWN_SEC,
+    FORWARD_WEBHOOK_TIMEOUT_SEC,
+    AUTO_TRADE_WEBHOOK_URL,
+    WONYODD_FX_RATE_AUTO_FETCH_ENABLED,
+    WONYODD_FX_RATE_BASE,
+    WONYODD_FX_RATE_FETCH_HOST,
+    WONYODD_FX_RATE_FETCH_INTERVAL_SEC,
+    WONYODD_FX_RATE_FETCH_TIMEOUT_SEC,
+    WONYODD_FX_RATE_QUOTE,
 )
 from . import db
 from .models import WebhookPayload
-from .recommend import recommend, tf_key
-from .notify import build_discord_message, send_discord_webhook
+from .recommend import recommend, tf_key, resolve_ready_rule
+from .notify import build_discord_message, send_discord_webhook, send_forward_webhooks
 from .alerts import detect_volume_volatility_spike
 from .coupang_banner import build_banner_payload, normalize_interest_category, record_interest_category
 
@@ -39,9 +51,284 @@ import json
 # Resolve project root (/opt/wonyodd-reco)
 PROJECT_ROOT = Path("/opt/wonyodd-reco")
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
+AUTO_TRADE_READY_TP = {
+    "A": "tp2_price",
+    "B": "tp2_price",
+    "C": "tp1_price",
+}
 
 app = FastAPI(title="Wonyodd Reco Engine", version="1.0.0")
 db.init_db()
+
+def _to_trade_price(value: Any) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except Exception:
+        return str(value)
+
+def _get_usdkrw_fx_rate() -> Optional[float]:
+    row = db.fetch_latest_fx_rate(WONYODD_FX_RATE_BASE, WONYODD_FX_RATE_QUOTE)
+    if row is None:
+        return None
+    try:
+        return float(row["rate"])
+    except Exception:
+        return None
+
+def _fetch_fx_rate_from_frankfurter(base: str, quote: str) -> tuple[float, str, str]:
+    base_u = str(base).upper()
+    quote_u = str(quote).upper()
+    params = urlencode({"base": base_u, "symbols": quote_u})
+    host = WONYODD_FX_RATE_FETCH_HOST.rstrip("/")
+    url = f"{host}/v1/latest?{params}"
+    req = urllib.request.Request(
+        url=url,
+        headers={"User-Agent": "Mozilla/5.0 WonyoddRecoFX"},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=max(1, WONYODD_FX_RATE_FETCH_TIMEOUT_SEC)) as resp:
+        if resp.status != 200:
+            body = resp.read(300).decode("utf-8", errors="replace")
+            body = body.replace("\\n", " ")
+            raise RuntimeError(f"frankfurter_status_{resp.status}:{body}")
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    rate = float(payload["rates"][quote_u])
+    as_of_date = str(payload.get("date"))
+    if not as_of_date:
+        as_of_date = time.strftime("%Y-%m-%d", time.gmtime())
+    return rate, as_of_date, url
+
+def _refresh_fx_rate(base: str, quote: str) -> Optional[float]:
+    try:
+        rate, as_of_date, source = _fetch_fx_rate_from_frankfurter(base, quote)
+        db.insert_fx_rate(base, quote, rate, as_of_date, source=source)
+        print(f"[INFO] FX rate updated {base.upper()}->{quote.upper()} date={as_of_date} rate={rate}")
+        return rate
+    except Exception as e:
+        print(f"[WARN] FX rate refresh failed: {type(e).__name__}: {e}")
+        return None
+
+def _resolve_usdkrw_fx_rate() -> Optional[float]:
+    rate = _get_usdkrw_fx_rate()
+    if rate is not None:
+        return rate
+    if not WONYODD_FX_RATE_AUTO_FETCH_ENABLED:
+        return None
+    return _refresh_fx_rate(WONYODD_FX_RATE_BASE, WONYODD_FX_RATE_QUOTE)
+
+def _start_fx_rate_worker() -> None:
+    if not WONYODD_FX_RATE_AUTO_FETCH_ENABLED:
+        return
+    interval = max(60, int(WONYODD_FX_RATE_FETCH_INTERVAL_SEC))
+    while True:
+        rate = _refresh_fx_rate(WONYODD_FX_RATE_BASE, WONYODD_FX_RATE_QUOTE)
+        if rate is not None:
+            sent = _flush_pending_upbit_webhooks(rate)
+            if sent:
+                print(f"[INFO] Pending upbit auto-trade webhook flushed: count={sent}")
+        time.sleep(interval)
+
+threading.Thread(target=_start_fx_rate_worker, daemon=True).start()
+
+def _auto_trade_order_sides(side: str) -> tuple[str, str, str, str]:
+    s = str(side or "").strip().lower()
+    if s == "long":
+        return "entry/buy", "close/sell", "롱OKX", "롱마감OKX"
+    if s == "short":
+        return "entry/sell", "close/buy", "숏OKX", "숏마감OKX"
+    raise ValueError("side must be long or short")
+
+def _build_auto_trade_payloads(rec: Dict[str, Any], fx_rate: Optional[float] = None) -> list[Dict[str, Any]]:
+    plan = rec.get("plan") or {}
+    selected = rec.get("selected") or {}
+    try:
+        side = str(plan.get("side") or rec.get("side") or "").strip().lower()
+    except Exception:
+        side = ""
+    if side not in ("long", "short"):
+        return []
+
+    rule = str(selected.get("ready_rule", plan.get("ready_rule", ""))).strip().upper()
+    tp_key = AUTO_TRADE_READY_TP.get(rule)
+    if tp_key is None:
+        return []
+
+    entry_price = plan.get("entry_price")
+    tp_price = plan.get(tp_key)
+    if entry_price is None or tp_price is None:
+        return []
+
+    entry_side, close_side, entry_name, close_name = _auto_trade_order_sides(side)
+    common = {
+        "password": "dldnjsgud",
+        "exchange": "OKX",
+        "base": "BTC",
+        "quote": "USDT.P",
+        "type": "limit",
+        "amount": "0.01",
+        "percent": "NaN",
+        "leverage": "50",
+        "margin_mode": "cross",
+    }
+    payloads = [
+        {
+            **common,
+            "side": entry_side,
+            "price": _to_trade_price(entry_price),
+            "order_name": entry_name,
+        },
+        {
+            **common,
+            "side": close_side,
+            "price": _to_trade_price(tp_price),
+            "order_name": close_name,
+        },
+    ]
+
+    if fx_rate is not None:
+        payloads.extend(_build_upbit_auto_trade_payloads(side, entry_price, tp_price, fx_rate))
+    return payloads
+
+def _build_upbit_auto_trade_payloads(
+    side: str,
+    entry_price: Any,
+    tp_price: Any,
+    fx_rate: float,
+) -> list[Dict[str, Any]]:
+    try:
+        entry_krw = _to_trade_price(float(entry_price) * float(fx_rate))
+        tp_krw = _to_trade_price(float(tp_price) * float(fx_rate))
+    except Exception:
+        return []
+
+    return [
+        {
+            "password": "dldnjsgud",
+            "exchange": "UPBIT",
+            "base": "BTC",
+            "quote": "KRW",
+            "side": "buy",
+            "type": "limit",
+            "amount": "NaN",
+            "price": entry_krw,
+            "percent": "95",
+            "order_name": "업비트 풀매수",
+        },
+        {
+            "password": "dldnjsgud",
+            "exchange": "UPBIT",
+            "base": "BTC",
+            "quote": "KRW",
+            "side": "sell",
+            "type": "limit",
+            "amount": "NaN",
+            "price": tp_krw,
+            "percent": "100",
+            "order_name": "업비트 풀매도",
+        },
+    ]
+
+def _send_auto_trade_webhook(payload: Dict[str, Any]) -> tuple[bool, str]:
+    if not AUTO_TRADE_WEBHOOK_URL:
+        return False, "auto_trade_webhook_missing"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url=AUTO_TRADE_WEBHOOK_URL,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 WonyoddRecoAutoTrade",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=FORWARD_WEBHOOK_TIMEOUT_SEC) as resp:
+            if 200 <= resp.status < 300:
+                return True, "sent"
+            body = resp.read(300).decode("utf-8", errors="replace")
+            if body:
+                body = body.replace("\n", "\\n")
+                return False, f"http_{resp.status}:{body}"
+            return False, f"http_{resp.status}"
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read(300).decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        if body:
+            return False, "http_{}:{}".format(e.code, body.replace("\n", "\\n"))
+        return False, f"http_{e.code}"
+    except Exception as e:
+        return False, f"request_error:{type(e).__name__}:{e}"
+
+def _enqueue_pending_upbit_trade(rec: Dict[str, Any]) -> bool:
+    plan = rec.get("plan") or {}
+    selected = rec.get("selected") or {}
+    try:
+        side = str(plan.get("side") or rec.get("side") or "").strip().lower()
+    except Exception:
+        side = ""
+    if side not in ("long", "short"):
+        return False
+
+    rule = str(selected.get("ready_rule", plan.get("ready_rule", ""))).strip().upper()
+    tp_key = AUTO_TRADE_READY_TP.get(rule)
+    if tp_key is None:
+        return False
+
+    entry_price = plan.get("entry_price")
+    tp_price = plan.get(tp_key)
+    if entry_price is None or tp_price is None:
+        return False
+
+    try:
+        db.insert_pending_upbit_auto_trade(side=side, entry_price=float(entry_price), tp_price=float(tp_price))
+        print(f"[INFO] Upbit retry queued: side={side}, entry={entry_price}, tp={tp_price}")
+        return True
+    except Exception as e:
+        print(f"[WARN] Upbit queue insert failed: {type(e).__name__}:{e}")
+        return False
+
+def _flush_pending_upbit_webhooks(fx_rate: Optional[float] = None) -> int:
+    if fx_rate is None:
+        fx_rate = _resolve_usdkrw_fx_rate()
+    if fx_rate is None:
+        return 0
+
+    sent_count = 0
+    pending_rows = db.fetch_pending_upbit_auto_trades(limit=100)
+    if not pending_rows:
+        return 0
+
+    for row in pending_rows:
+        pid = int(row["id"])
+        side = str(row["side"])
+        entry = row["entry_price"]
+        tp = row["tp_price"]
+        upbit_payloads = _build_upbit_auto_trade_payloads(side, entry, tp, fx_rate)
+        if not upbit_payloads:
+            db.bump_pending_upbit_auto_trade(pid, "invalid_price")
+            continue
+
+        results = []
+        all_ok = True
+        for payload in upbit_payloads:
+            ok, detail = _send_auto_trade_webhook(payload)
+            results.append((payload.get("order_name"), ok, detail))
+            all_ok = all_ok and ok
+            print(
+                "[DEBUG] Pending upbit auto-trade webhook: "
+                + json.dumps({"id": pid, "order_name": payload.get("order_name"), "ok": ok, "detail": detail}, ensure_ascii=False)
+            )
+        if all_ok:
+            db.delete_pending_upbit_auto_trade(pid)
+            sent_count += 1
+            print(f"[INFO] Pending upbit auto-trade webhook sent and removed: id={pid}, side={side}")
+        else:
+            last = ",".join([str(x[2]) for x in results if x[1] is False][-1:] or ["unknown"])
+            db.bump_pending_upbit_auto_trade(pid, last)
+    return sent_count
 
 def _parse_tf_list(s: str) -> set[str]:
     out: set[str] = set()
@@ -158,11 +445,33 @@ def _maybe_notify_spike(
             print("[DEBUG] Spike notify skipped (status!=ready)")
             continue
 
-        msg = build_discord_message(rec, context=ctx, content="스파이크 감지 → 추천")
-        ok, detail = send_discord_webhook(msg)
-        print(f"[DEBUG] Spike notify: ok={ok} detail={detail}")
-        if ok:
-            db.insert_notification(kind, tf, ts, created_ts=now, detail=json.dumps({"ctx": ctx, "detail": detail}, ensure_ascii=False))
+        # Spike-only policy: keep server-side logging, but do not send Discord messages.
+        inserted = db.insert_notification(
+            kind,
+            tf,
+            ts,
+            created_ts=now,
+            detail=json.dumps(
+                {"ctx": ctx, "detail": "logged_only_no_discord"},
+                ensure_ascii=False,
+            ),
+        )
+        forward_results = send_forward_webhooks({
+            "event": "spike",
+            "kind": kind,
+            "timeframe": tf,
+            "ts": ts,
+            "created_ts": now,
+            "recommend": rec,
+            "context": ctx,
+            "db_logged": inserted,
+        })
+        if forward_results:
+            print(
+                "[DEBUG] Spike forward webhooks: "
+                + json.dumps([(u, ok, d) for u, ok, d in forward_results], ensure_ascii=False)
+            )
+        print(f"[DEBUG] Spike notify logged only: inserted={inserted}")
 
 def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_close: bool = False) -> None:
     if not READY_NOTIFY_ENABLED:
@@ -210,11 +519,56 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
             except Exception:
                 pass
 
-        msg = build_discord_message(rec, context=ctx, content="READY 신호 → 추천")
+        msg = build_discord_message(rec, context=ctx, content=_ready_notify_content(rec))
         ok, detail = send_discord_webhook(msg)
         print(f"[DEBUG] Ready notify: ok={ok} detail={detail}")
+        auto_trade_results = []
         if ok:
-            db.insert_notification(kind, tf, ts, created_ts=now, detail=json.dumps({"ctx": ctx, "detail": detail}, ensure_ascii=False))
+            fx_rate = _resolve_usdkrw_fx_rate()
+            if fx_rate is None:
+                queued = _enqueue_pending_upbit_trade(rec)
+                print(f"[WARN] USD/KRW 환율이 없어 업비트 풀매수/풀매도 전송을 생략합니다. queued={queued}")
+                if queued:
+                    auto_trade_results.append(("upbit", "queued", True, "queued"))
+            for payload in _build_auto_trade_payloads(rec, fx_rate=fx_rate):
+                ok2, detail2 = _send_auto_trade_webhook(payload)
+                auto_trade_results.append((payload.get("side"), payload.get("order_name"), ok2, detail2))
+                print(
+                    "[DEBUG] Ready auto-trade webhook: "
+                    + json.dumps({"side": payload.get("side"), "order_name": payload.get("order_name"), "ok": ok2, "detail": detail2},
+                                 ensure_ascii=False)
+                )
+        forward_results = send_forward_webhooks({
+            "event": "ready",
+            "kind": kind,
+            "timeframe": tf,
+            "ts": ts,
+            "created_ts": now,
+            "recommend": rec,
+            "context": ctx,
+            "discord": {"ok": ok, "detail": detail},
+            "auto_trade": {"ok": bool(auto_trade_results), "details": auto_trade_results},
+        })
+        if forward_results:
+            print(
+                "[DEBUG] Ready forward webhooks: "
+                + json.dumps([(u, ok2, d) for u, ok2, d in forward_results], ensure_ascii=False)
+            )
+        if ok:
+            db.insert_notification(
+                kind,
+                tf,
+                ts,
+                created_ts=now,
+                detail=json.dumps(
+                    {
+                        "ctx": ctx,
+                        "detail": detail,
+                        "auto_trade": auto_trade_results,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
 
 def _parse_ts(payload: WebhookPayload) -> int:
     # 1. ts field
@@ -237,6 +591,30 @@ def _parse_ts(payload: WebhookPayload) -> int:
     if val > 10_000_000_000:
         val //= 1000
     return val
+
+def _ready_notify_content(rec: dict) -> str:
+    selected = (rec or {}).get("selected") or {}
+    plan = (rec or {}).get("plan") or {}
+    rule = selected.get("ready_rule", plan.get("ready_rule"))
+    rule_norm = str(rule).strip().upper() if rule else ""
+    if rule_norm not in ("A", "B", "C", "D"):
+        rule_norm = "-"
+
+    sma_distance_pct = selected.get("sma_distance_pct")
+    atr_pct = selected.get("atr_pct")
+    if sma_distance_pct is not None and atr_pct is not None:
+        resolved_rule, resolved_mdd = resolve_ready_rule(sma_distance_pct, atr_pct)
+        if resolved_rule in ("A", "B", "C", "D"):
+            rule_norm = resolved_rule
+            plan["ready_rule"] = resolved_rule
+            selected["ready_rule"] = resolved_rule
+            if resolved_mdd is not None:
+                plan["ready_rule_mdd_pct"] = resolved_mdd
+                selected["ready_rule_mdd_pct"] = resolved_mdd
+
+    if rule_norm in ("A", "B", "C", "D"):
+        return f"READY신호->추천({rule_norm})"
+    return "READY신호->추천"
 
 def _auth_ok(payload: WebhookPayload, header_secret: str) -> bool:
     if not WEBHOOK_SECRET:
@@ -437,8 +815,19 @@ def api_recommend(side: str, risk_pct: Optional[float] = None, tf: Optional[str]
 def api_notify_recommend(side: str, risk_pct: Optional[float] = None, tf: Optional[str] = None):
     try:
         out = recommend(side=side, risk_pct=risk_pct, focus_tf=tf)
-        msg = build_discord_message(out)
+        content = "추천"
+        if (out.get("selected") or {}).get("status") == "ready":
+            content = _ready_notify_content(out)
+        msg = build_discord_message(out, content=content)
         ok, detail = send_discord_webhook(msg)
+        send_forward_webhooks({
+            "event": "manual_recommend",
+            "kind": "manual",
+            "timeframe": out.get("plan", {}).get("tf", tf),
+            "recommend": out,
+            "discord": {"ok": ok, "detail": detail},
+            "risk_pct": risk_pct,
+        })
         return {"ok": ok, "detail": detail, "recommend": out}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -454,6 +843,23 @@ def latest():
         row = db.fetch_latest(tf)
         out[tf] = {"ts": int(row["ts"]), "close": float(row["close"])} if row else None
     return {"ok": True, "latest": out}
+
+@app.get("/api/fx-rate")
+def fx_rate():
+    base = str(WONYODD_FX_RATE_BASE).upper()
+    quote = str(WONYODD_FX_RATE_QUOTE).upper()
+    row = db.fetch_latest_fx_rate(base, quote)
+    if row is None:
+        return {"ok": False, "base": base, "quote": quote, "rate": None}
+    return {
+        "ok": True,
+        "base": base,
+        "quote": quote,
+        "rate": float(row["rate"]),
+        "as_of_date": row["as_of_date"],
+        "fetched_ts": int(row["fetched_ts"]),
+        "source": row["source"],
+    }
 
 @app.get("/api/coupang-banner")
 def coupang_banner(keyword: Optional[str] = None, category: Optional[str] = None, limit: int = 3):

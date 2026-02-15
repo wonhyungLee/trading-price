@@ -84,6 +84,13 @@ export const GLOSSARY: GlossaryEntry[] = [
     tags: ['스코어'],
   },
   {
+    term: 'Ready Rule',
+    short: 'READY 신호 발생 시 적용되는 규칙',
+    detail:
+      'A/B/C/D 규칙은 SMA5 편차와 ATR% 조건으로 분기됩니다. A/B/C는 No Stop 운영, 규칙별 추천 TP( A/B: TP2, C/D: TP1 )를 함께 사용해 손익/리스크 선호도에 맞게 실행합니다.',
+    tags: ['규칙', 'ABCD', 'MDD', 'TP'],
+  },
+  {
     term: 'BT',
     short: '최근 백테스트 점수(정규화)',
     detail:

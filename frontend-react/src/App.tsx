@@ -7,6 +7,35 @@ type Side = 'long' | 'short';
 
 const BANNER_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const BANNER_COOLDOWN_KEY = 'cpb_cooldown_until';
+const READY_RULE_INFO: Record<
+  string,
+  { title: string; desc: string; recommendedTp: 'TP1' | 'TP2' | '-'; noStop: boolean }
+> = {
+  A: {
+    title: '규칙 A',
+    desc: 'SMA5 이탈폭이 0.3% 이내면 발동합니다. ATR 제한은 없습니다. 단기 되돌림 구간에서도 기회를 놓치지 않도록 완만한 진입 구간입니다.',
+    recommendedTp: 'TP2',
+    noStop: true,
+  },
+  B: {
+    title: '규칙 B',
+    desc: 'SMA5 이탈폭이 0.3% 이내 + ATR% 1.5% 이하에서 발동합니다. 변동성이 과도하지 않은 상태에서 진입 타이밍의 정합성이 높은 구간입니다.',
+    recommendedTp: 'TP2',
+    noStop: true,
+  },
+  C: {
+    title: '규칙 C',
+    desc: 'SMA5 이탈폭이 0.2% 이내 + ATR% 1.5% 이하에서 발동합니다. 가장 빠르게 회복될 가능성이 높은 보수형 구간입니다.',
+    recommendedTp: 'TP1',
+    noStop: true,
+  },
+  D: {
+    title: '규칙 D',
+    desc: 'ABCD 조건에 해당하지 않을 때의 기본 구간입니다. ATR%가 1.5% 이내일 때만 일반 Stop 규칙을 유지합니다.',
+    recommendedTp: 'TP1',
+    noStop: false,
+  },
+};
 
 function readBannerCooldown(): number {
   try {
@@ -109,6 +138,25 @@ export default function App() {
   const selected = rec?.selected;
   const notes: string[] = Array.isArray(rec?.notes) ? rec.notes : [];
   const candidates = useMemo(() => (Array.isArray(rec?.candidates) ? rec.candidates : []), [rec]);
+  const selectedRule = String(selected?.ready_rule || plan?.ready_rule || '-').toUpperCase();
+  const selectedRuleMeta = READY_RULE_INFO[selectedRule];
+  const selectedRuleMdd = selected?.ready_rule_mdd_pct ?? plan?.ready_rule_mdd_pct;
+  const selectedRecommendedTp = selectedRuleMeta?.recommendedTp ?? '-';
+  const isNoStopRule = Boolean(selectedRuleMeta?.noStop && selected?.status === 'ready');
+
+  function renderTpValue(value: any, isRecommended: boolean) {
+    const text = fmt(value);
+    if (!text || text === '-') {
+      return text;
+    }
+    return isRecommended ? `${text} (추천)` : text;
+  }
+
+  function formatRuleMdd(value: any): string {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '-';
+    return `${n.toFixed(2)}%`;
+  }
 
   function openGlossary(term?: string) {
     setGlossaryQuery(term ?? '');
@@ -541,6 +589,11 @@ export default function App() {
                       <Term label={`conf ${regime.confidence}`} term="Conf" />
                     </span>
                   ) : null}
+                  {selectedRuleMeta ? (
+                    <span className="pill">
+                      <Term label={selectedRuleMeta.title} term="Ready Rule" />
+                    </span>
+                  ) : null}
                 </div>
               </div>
 
@@ -667,7 +720,39 @@ export default function App() {
                   <div className="metaRow">
                     <span className="muted">TP2/TP3</span>
                     <span>
-                      <b>{fmt(plan?.tp2_price)}</b> / <b>{fmt(plan?.tp3_price)}</b>
+                      <b>{renderTpValue(plan?.tp2_price, selectedRecommendedTp === 'TP2' && selected?.status === 'ready')}</b> / <b>{fmt(plan?.tp3_price)}</b>
+                    </span>
+                  </div>
+                  <div className="metaRow">
+                    <span className="muted">TP1</span>
+                    <span>
+                      <b>{renderTpValue(plan?.tp1_price, selectedRecommendedTp === 'TP1' && selected?.status === 'ready')}</b>
+                    </span>
+                  </div>
+                  <div className="metaRow">
+                    <span className="muted">
+                      <Term label="Ready Rule" term="Ready Rule" />
+                    </span>
+                    <span>
+                      <b>{selectedRuleMeta?.title ?? '-'}</b>{' '}
+                      <span className="muted">
+                        {selectedRuleMdd != null ? `· MDD ${formatRuleMdd(selectedRuleMdd)}` : ''}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="metaRow">
+                    <span className="muted">규칙 부연</span>
+                    <span className="ruleDesc">{selectedRuleMeta?.desc ?? '-'}</span>
+                  </div>
+                  <div className="metaRow">
+                    <span className="muted">추천 TP</span>
+                    <span>
+                      <b>{selectedRecommendedTp}</b>{' '}
+                      {selected?.status === 'ready' ? (
+                        <span className="muted">
+                          ({selectedRecommendedTp === 'TP2' ? fmt(plan?.tp2_price) : fmt(plan?.tp1_price)})
+                        </span>
+                      ) : null}
                     </span>
                   </div>
                   <div className="metaRow">
@@ -676,6 +761,18 @@ export default function App() {
                       <b>{plan?.max_leverage_by_risk ?? '-'}</b>x <span className="muted">(리스크 {plan?.risk_pct ?? '-'}%)</span>
                     </span>
                   </div>
+                  <div className="metaRow">
+                    <span className="muted">권장 최대 배율(MDD)</span>
+                    <span>
+                      <b>{plan?.max_leverage_by_mdd ?? '-'}</b>x <span className="muted">전체 MDD 기준</span>
+                    </span>
+                  </div>
+                  {isNoStopRule ? (
+                    <div className="metaRow">
+                      <span className="muted">청산 방식</span>
+                      <span>No Stop({selectedRuleMeta?.title})</span>
+                    </div>
+                  ) : null}
                   <div className="metaRow">
                     <span className="muted">청산 룰</span>
                     <span>{plan?.tp_rule ?? '-'}</span>
@@ -712,6 +809,8 @@ export default function App() {
                     <th>
                       <Term label="BT" term="BT" />
                     </th>
+                    <th>Rule</th>
+                    <th>Rule MDD</th>
                     <th>Signal</th>
                     <th>Close</th>
                     <th>
@@ -749,6 +848,8 @@ export default function App() {
                           <div className="barFill" style={{ width: `${Math.round((Number(c.backtest_score_norm) || 0) * 100)}%` }} />
                         </div>
                       </td>
+                      <td>{(c.ready_rule ?? '-').toUpperCase?.() ?? '-'}</td>
+                      <td>{formatRuleMdd(c.ready_rule_mdd_pct)}</td>
                       <td>{c.trigger_now ? 'READY' : 'WAIT'}</td>
                       <td>{fmt(c.close)}</td>
                       <td>{fmt(c.sma5)}</td>

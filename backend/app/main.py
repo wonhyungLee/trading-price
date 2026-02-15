@@ -1,6 +1,7 @@
 from __future__ import annotations
 import time
 from pathlib import Path
+import sqlite3
 import threading
 import urllib.error
 import urllib.request
@@ -56,8 +57,15 @@ AUTO_TRADE_READY_TP = {
     "B": "tp2_price",
     "C": "tp1_price",
 }
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
 READY_RULE_NOTIFY_SET = {"A", "B", "C", "D"}
 READY_RULE_AUTO_TRADE_SET = {"A", "B", "C"}
+TIMEFRAME_SECONDS = {"30m": 1800, "60m": 3600, "180m": 10800}
 
 app = FastAPI(title="Wonyodd Reco Engine", version="1.0.0")
 db.init_db()
@@ -76,6 +84,87 @@ def _get_usdkrw_fx_rate() -> Optional[float]:
         return float(row["rate"])
     except Exception:
         return None
+
+def _align_to_tf_bucket(ts: int, tf: str) -> int:
+    sec = TIMEFRAME_SECONDS.get(tf)
+    if sec is None:
+        return ts
+    return int(ts - (int(ts) % sec))
+
+def _merge_payload_to_bucket(
+    tf: str,
+    bucket_ts: int,
+    payload: WebhookPayload,
+) -> tuple[float, float, float, float, Optional[float]]:
+    existing = db.fetch_one(tf, bucket_ts)
+    if existing is None:
+        return (
+            float(payload.open),
+            float(payload.high),
+            float(payload.low),
+            float(payload.close),
+            float(payload.volume) if payload.volume is not None else None,
+        )
+
+    open_price = float(existing["open"])
+    high_price = max(float(existing["high"]), float(payload.high))
+    low_price = min(float(existing["low"]), float(payload.low))
+    close_price = float(payload.close)
+    existing_volume = existing["volume"]
+    existing_v = float(existing_volume) if existing_volume is not None else 0.0
+    incoming_v = float(payload.volume) if payload.volume is not None else 0.0
+    merged_v = existing_v + incoming_v
+    return open_price, high_price, low_price, close_price, merged_v
+
+def _rebuild_tf_from_1m(tf: str, limit: int) -> list[dict]:
+    tf_sec = TIMEFRAME_SECONDS.get(tf)
+    if tf_sec is None:
+        return []
+
+    latest_1m = db.fetch_latest("1m")
+    if latest_1m is None:
+        return []
+
+    end_ts = int(latest_1m["ts"])
+    span_seconds = max(2, int(limit)) * tf_sec
+    start_ts = max(0, end_ts - span_seconds)
+    rows = db.fetch_range("1m", start_ts, end_ts)
+    if not rows:
+        return []
+
+    buckets: dict[int, dict[str, float]] = {}
+    for row in rows:
+        raw_ts = int(row["ts"])
+        bucket_ts = raw_ts - (raw_ts % tf_sec)
+        open_price = float(row["open"])
+        high_price = float(row["high"])
+        low_price = float(row["low"])
+        close_price = float(row["close"])
+        volume = float(row["volume"]) if row["volume"] is not None else 0.0
+
+        item = buckets.get(bucket_ts)
+        if item is None:
+            buckets[bucket_ts] = {
+                "ts": bucket_ts,
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+                "volume": volume,
+            }
+            continue
+
+        if high_price > item["high"]:
+            item["high"] = high_price
+        if low_price < item["low"]:
+            item["low"] = low_price
+        item["close"] = close_price
+        item["volume"] = float(item["volume"]) + volume
+
+    rebuilt = [buckets[k] for k in sorted(buckets.keys())]
+    if not rebuilt:
+        return []
+    return rebuilt[-limit:]
 
 def _fetch_fx_rate_from_frankfurter(base: str, quote: str) -> tuple[float, str, str]:
     base_u = str(base).upper()
@@ -125,9 +214,9 @@ def _start_fx_rate_worker() -> None:
     while True:
         rate = _refresh_fx_rate(WONYODD_FX_RATE_BASE, WONYODD_FX_RATE_QUOTE)
         if rate is not None:
-            sent = _flush_pending_upbit_webhooks(rate)
+            sent = _flush_pending_auto_trade_webhooks(rate)
             if sent:
-                print(f"[INFO] Pending upbit auto-trade webhook flushed: count={sent}")
+                print(f"[INFO] Pending auto-trade webhook flushed: count={sent}")
         time.sleep(interval)
 
 threading.Thread(target=_start_fx_rate_worker, daemon=True).start()
@@ -164,7 +253,113 @@ def _resolve_ready_rule(selected: dict, plan: dict) -> tuple[str, Optional[float
 
     return rule_norm, rule_mdd
 
-def _build_auto_trade_payloads(rec: Dict[str, Any], fx_rate: Optional[float] = None) -> list[Dict[str, Any]]:
+def _build_okx_auto_trade_order_tasks(
+    side: str,
+    entry_price: float,
+    tp_price: float,
+) -> list[Dict[str, Any]]:
+    try:
+        entry_side, close_side, entry_name, close_name = _auto_trade_order_sides(side)
+    except ValueError:
+        return []
+
+    common = {
+        "password": "dldnjsgud",
+        "base": "BTC",
+        "quote": "USDT.P",
+        "type": "limit",
+        "amount": "0.01",
+        "percent": "NaN",
+        "leverage": "50",
+        "margin_mode": "cross",
+    }
+
+    return [
+        {
+            "order_name": entry_name,
+            "exchange": "OKX",
+            "order_side": entry_side,
+            "trigger_type": "entry",
+            "trigger_price": entry_price,
+            "requires_fx": False,
+            "payload": {
+                **common,
+                "side": entry_side,
+                "price": _to_trade_price(entry_price),
+                "order_name": entry_name,
+            },
+        },
+        {
+            "order_name": close_name,
+            "exchange": "OKX",
+            "order_side": close_side,
+            "trigger_type": "tp",
+            "trigger_price": tp_price,
+            "requires_fx": False,
+            "payload": {
+                **common,
+                "side": close_side,
+                "price": _to_trade_price(tp_price),
+                "order_name": close_name,
+            },
+        },
+    ]
+
+
+def _build_upbit_auto_trade_order_tasks(
+    side: str,
+    entry_price: float,
+    tp_price: float,
+) -> list[Dict[str, Any]]:
+    side_norm = str(side).strip().lower()
+    if side_norm != "long":
+        return []
+
+    return [
+        {
+            "order_name": "업비트 풀매수",
+            "exchange": "UPBIT",
+            "order_side": "buy",
+            "trigger_type": "entry",
+            "trigger_price": entry_price,
+            "requires_fx": True,
+            "payload": {
+                "password": "dldnjsgud",
+                "exchange": "UPBIT",
+                "base": "BTC",
+                "quote": "KRW",
+                "side": "buy",
+                "type": "limit",
+                "amount": "NaN",
+                "price_usd": _to_trade_price(entry_price),
+                "percent": "95",
+                "order_name": "업비트 풀매수",
+            },
+        },
+        {
+            "order_name": "업비트 풀매도",
+            "exchange": "UPBIT",
+            "order_side": "sell",
+            "trigger_type": "tp",
+            "trigger_price": tp_price,
+            "requires_fx": True,
+            "payload": {
+                "password": "dldnjsgud",
+                "exchange": "UPBIT",
+                "base": "BTC",
+                "quote": "KRW",
+                "side": "sell",
+                "type": "limit",
+                "amount": "NaN",
+                "price_usd": _to_trade_price(tp_price),
+                "percent": "100",
+                "order_name": "업비트 풀매도",
+            },
+        },
+    ]
+
+
+def _build_auto_trade_order_tasks(rec: Dict[str, Any]) -> list[Dict[str, Any]]:
     plan = rec.get("plan") or {}
     selected = rec.get("selected") or {}
     try:
@@ -182,92 +377,16 @@ def _build_auto_trade_payloads(rec: Dict[str, Any], fx_rate: Optional[float] = N
     if tp_key is None:
         return []
 
-    entry_price = plan.get("entry_price")
-    tp_price = plan.get(tp_key)
+    entry_price = _to_float(plan.get("entry_price"))
+    tp_price = _to_float(plan.get(tp_key))
     if entry_price is None or tp_price is None:
         return []
 
-    payloads = _build_okx_auto_trade_payloads(side, entry_price, tp_price)
-
-    if fx_rate is not None:
-        payloads.extend(_build_upbit_auto_trade_payloads(side, entry_price, tp_price, fx_rate))
+    payloads = []
+    payloads.extend(_build_okx_auto_trade_order_tasks(side, entry_price, tp_price))
+    payloads.extend(_build_upbit_auto_trade_order_tasks(side, entry_price, tp_price))
     return payloads
 
-
-def _build_okx_auto_trade_payloads(
-    side: str,
-    entry_price: Any,
-    tp_price: Any,
-) -> list[Dict[str, Any]]:
-    entry_side, close_side, entry_name, close_name = _auto_trade_order_sides(side)
-    common = {
-        "password": "dldnjsgud",
-        "exchange": "OKX",
-        "base": "BTC",
-        "quote": "USDT.P",
-        "type": "limit",
-        "amount": "0.01",
-        "percent": "NaN",
-        "leverage": "50",
-        "margin_mode": "cross",
-    }
-    return [
-        {
-            **common,
-            "side": entry_side,
-            "price": _to_trade_price(entry_price),
-            "order_name": entry_name,
-        },
-        {
-            **common,
-            "side": close_side,
-            "price": _to_trade_price(tp_price),
-            "order_name": close_name,
-        },
-    ]
-
-
-def _build_upbit_auto_trade_payloads(
-    side: str,
-    entry_price: Any,
-    tp_price: Any,
-    fx_rate: float,
-) -> list[Dict[str, Any]]:
-    side_norm = str(side).strip().lower()
-    if side_norm != "long":
-        return []
-    try:
-        entry_krw = _to_trade_price(float(entry_price) * float(fx_rate))
-        tp_krw = _to_trade_price(float(tp_price) * float(fx_rate))
-    except Exception:
-        return []
-
-    return [
-        {
-            "password": "dldnjsgud",
-            "exchange": "UPBIT",
-            "base": "BTC",
-            "quote": "KRW",
-            "side": "buy",
-            "type": "limit",
-            "amount": "NaN",
-            "price": entry_krw,
-            "percent": "95",
-            "order_name": "업비트 풀매수",
-        },
-        {
-            "password": "dldnjsgud",
-            "exchange": "UPBIT",
-            "base": "BTC",
-            "quote": "KRW",
-            "side": "sell",
-            "type": "limit",
-            "amount": "NaN",
-            "price": tp_krw,
-            "percent": "100",
-            "order_name": "업비트 풀매도",
-        },
-    ]
 
 def _send_auto_trade_webhook(payload: Dict[str, Any]) -> tuple[bool, str]:
     if not AUTO_TRADE_WEBHOOK_URL:
@@ -303,75 +422,127 @@ def _send_auto_trade_webhook(payload: Dict[str, Any]) -> tuple[bool, str]:
     except Exception as e:
         return False, f"request_error:{type(e).__name__}:{e}"
 
-def _enqueue_pending_upbit_trade(rec: Dict[str, Any]) -> bool:
+
+def _queue_auto_trade_orders(rec: Dict[str, Any]) -> list[Dict[str, Any]]:
     plan = rec.get("plan") or {}
     selected = rec.get("selected") or {}
+    rule_norm, _ = _resolve_ready_rule(selected, plan)
+    side = str(plan.get("side") or rec.get("side") or "").strip().lower()
+    tp_key = AUTO_TRADE_READY_TP.get(rule_norm)
+    tp_price = _to_float(plan.get(tp_key)) if tp_key else None
+    orders = _build_auto_trade_order_tasks(rec)
+    if not orders:
+        return []
+
+    queued: list[Dict[str, Any]] = []
+    for order in orders:
+        try:
+            order_name = str(order["order_name"])
+            payload_json = json.dumps(order["payload"], ensure_ascii=False)
+            queued_id = db.insert_pending_auto_trade(
+                side=side,
+                order_name=order_name,
+                order_side=str(order["order_side"]),
+                exchange=str(order["exchange"]),
+                trigger_type=str(order["trigger_type"]),
+                trigger_price=float(order["trigger_price"]),
+                payload_json=payload_json,
+                requires_fx=bool(order.get("requires_fx")),
+                entry_price=_to_float(plan.get("entry_price")),
+                tp_price=tp_price,
+            )
+        except Exception as e:
+            print(f"[WARN] Auto-trade queue insert failed: {type(e).__name__}:{e}")
+            continue
+
+        print(
+            "[INFO] Auto-trade queued: "
+            + json.dumps(
+                {"id": queued_id, "order_name": order_name, "exchange": order.get("exchange"), "trigger_type": order.get("trigger_type")},
+                ensure_ascii=False,
+            )
+        )
+        queued.append(order)
+    return queued
+
+
+def _trigger_price_hit(trigger_price: float, candle: sqlite3.Row) -> bool:
     try:
-        side = str(plan.get("side") or rec.get("side") or "").strip().lower()
+        low = float(candle["low"])
+        high = float(candle["high"])
+        return low <= trigger_price <= high
     except Exception:
-        side = ""
-    if side != "long":
         return False
 
-    rule, _ = _resolve_ready_rule(selected, plan)
-    tp_key = AUTO_TRADE_READY_TP.get(rule)
-    if tp_key is None:
-        return False
 
-    entry_price = plan.get("entry_price")
-    tp_price = plan.get(tp_key)
-    if entry_price is None or tp_price is None:
-        return False
-
+def _build_pending_payload_from_row(row: sqlite3.Row, fx_rate: Optional[float]) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    payload_raw = row["payload_json"]
+    if not payload_raw:
+        return None, "missing_payload_json"
     try:
-        db.insert_pending_upbit_auto_trade(side=side, entry_price=float(entry_price), tp_price=float(tp_price))
-        print(f"[INFO] Upbit retry queued: side={side}, entry={entry_price}, tp={tp_price}")
-        return True
-    except Exception as e:
-        print(f"[WARN] Upbit queue insert failed: {type(e).__name__}:{e}")
-        return False
+        payload = json.loads(payload_raw)
+    except Exception:
+        return None, "invalid_payload_json"
+    if not isinstance(payload, dict):
+        return None, "invalid_payload_type"
 
-def _flush_pending_upbit_webhooks(fx_rate: Optional[float] = None) -> int:
+    requires_fx = bool(int(row["requires_fx"] or 0))
+    if requires_fx:
+        if fx_rate is None:
+            return None, "missing_fx_rate"
+        price_usd = payload.pop("price_usd", None)
+        if price_usd is None:
+            if "price" in payload:
+                return payload, None
+            return None, "missing_upbit_price_usd"
+        try:
+            payload["price"] = _to_trade_price(float(price_usd) * float(fx_rate))
+        except Exception:
+            return None, "invalid_upbit_price_usd"
+        payload.pop("price_usd", None)
+    return payload, None
+
+
+def _flush_pending_auto_trade_webhooks(fx_rate: Optional[float] = None) -> int:
     if fx_rate is None:
         fx_rate = _resolve_usdkrw_fx_rate()
-    if fx_rate is None:
+
+    latest_1m = db.fetch_latest("1m")
+    if latest_1m is None:
         return 0
 
     sent_count = 0
-    pending_rows = db.fetch_pending_upbit_auto_trades(limit=100)
+    pending_rows = db.fetch_pending_auto_trades(limit=100)
     if not pending_rows:
         return 0
 
     for row in pending_rows:
         pid = int(row["id"])
-        side = str(row["side"])
-        if side != "long":
-            db.bump_pending_upbit_auto_trade(pid, "invalid_side")
+        trigger = _to_float(row["trigger_price"])
+        if trigger is None:
+            db.bump_pending_auto_trade(pid, "invalid_trigger_price")
             continue
-        entry = row["entry_price"]
-        tp = row["tp_price"]
-        upbit_payloads = _build_upbit_auto_trade_payloads(side, entry, tp, fx_rate)
-        if not upbit_payloads:
-            db.bump_pending_upbit_auto_trade(pid, "invalid_price")
+        if not _trigger_price_hit(trigger, latest_1m):
             continue
 
-        results = []
-        all_ok = True
-        for payload in upbit_payloads:
-            ok, detail = _send_auto_trade_webhook(payload)
-            results.append((payload.get("order_name"), ok, detail))
-            all_ok = all_ok and ok
-            print(
-                "[DEBUG] Pending upbit auto-trade webhook: "
-                + json.dumps({"id": pid, "order_name": payload.get("order_name"), "ok": ok, "detail": detail}, ensure_ascii=False)
-            )
-        if all_ok:
-            db.delete_pending_upbit_auto_trade(pid)
+        payload, err = _build_pending_payload_from_row(row, fx_rate)
+        if payload is None:
+            if err == "missing_fx_rate":
+                continue
+            db.bump_pending_auto_trade(pid, err or "invalid_payload")
+            continue
+
+        ok, detail = _send_auto_trade_webhook(payload)
+        print(
+            "[DEBUG] Pending auto-trade webhook: "
+            + json.dumps({"id": pid, "order_name": row["order_name"], "ok": ok, "detail": detail}, ensure_ascii=False)
+        )
+        if ok:
+            db.delete_pending_auto_trade(pid)
             sent_count += 1
-            print(f"[INFO] Pending upbit auto-trade webhook sent and removed: id={pid}, side={side}")
+            print(f"[INFO] Pending auto-trade webhook sent and removed: id={pid}, order_name={row['order_name']}")
         else:
-            last = ",".join([str(x[2]) for x in results if x[1] is False][-1:] or ["unknown"])
-            db.bump_pending_upbit_auto_trade(pid, last)
+            db.bump_pending_auto_trade(pid, detail)
     return sent_count
 
 def _parse_tf_list(s: str) -> set[str]:
@@ -575,20 +746,18 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
         auto_trade_results = []
         should_auto_trade = rule_norm in READY_RULE_AUTO_TRADE_SET
         if ok and should_auto_trade:
-            fx_rate = _resolve_usdkrw_fx_rate()
-            if fx_rate is None and str(side).strip().lower() == "long":
-                queued = _enqueue_pending_upbit_trade(rec)
-                print(f"[WARN] USD/KRW 환율이 없어 업비트 풀매수/풀매도 전송을 생략합니다. queued={queued}")
-                if queued:
-                    auto_trade_results.append(("upbit", "queued", True, "queued"))
-            for payload in _build_auto_trade_payloads(rec, fx_rate=fx_rate):
-                ok2, detail2 = _send_auto_trade_webhook(payload)
-                auto_trade_results.append((payload.get("side"), payload.get("order_name"), ok2, detail2))
-                print(
-                    "[DEBUG] Ready auto-trade webhook: "
-                    + json.dumps({"side": payload.get("side"), "order_name": payload.get("order_name"), "ok": ok2, "detail": detail2},
-                                 ensure_ascii=False)
+            queued = _queue_auto_trade_orders(rec)
+            for order in queued:
+                auto_trade_results.append(
+                    (
+                        str(order.get("exchange")),
+                        str(order.get("order_name")),
+                        True,
+                        "queued",
+                    )
                 )
+            if not queued:
+                auto_trade_results.append((side, "queued", False, "queue_failed"))
         forward_results = send_forward_webhooks({
             "event": "ready",
             "kind": kind,
@@ -747,7 +916,7 @@ def _partial_candle_from_1m(tf_norm: str) -> Optional[dict]:
 
     last_closed = db.fetch_latest(tf_norm)
     last_closed_ts = int(last_closed["ts"]) if last_closed else -1
-    if bucket_start <= last_closed_ts:
+    if bucket_start < last_closed_ts:
         return None
 
     rows = db.fetch_range("1m", bucket_start, latest_ts)
@@ -768,6 +937,58 @@ def _partial_candle_from_1m(tf_norm: str) -> Optional[dict]:
         "volume": v,
         "is_partial": True,
     }
+
+
+def _latest_for_display_tf(tf: str) -> Optional[dict]:
+    row = db.fetch_latest(tf)
+    tf_sec = TIMEFRAME_SECONDS.get(tf)
+    if row is None:
+        return None
+
+    if tf_sec is None:
+        return row
+
+    latest_ts = int(row["ts"])
+    latest_cap = _latest_1m_ts()
+    if latest_ts % tf_sec == 0:
+        if latest_cap is not None and latest_ts > latest_cap:
+            row = None
+            latest_ts = -1
+        else:
+            if latest_cap is not None:
+                latest_bucket_start = latest_cap - (latest_cap % tf_sec)
+                if latest_ts == latest_bucket_start:
+                    partial = _partial_candle_from_1m(tf)
+                    if partial is not None and int(partial["ts"]) == latest_bucket_start:
+                        return partial
+            return row
+
+    rows = db.fetch_recent(tf, 2000)
+    for candidate in reversed(rows):
+        c_ts = int(candidate["ts"])
+        if latest_cap is not None and c_ts > latest_cap:
+            continue
+        if c_ts % tf_sec == 0:
+            return candidate
+
+    partial = _partial_candle_from_1m(tf)
+    if partial is not None and (latest_cap is None or int(partial["ts"]) <= latest_cap):
+        return partial
+
+    if row and _latest_1m_ts() is not None and int(row["ts"]) <= _latest_1m_ts():
+        return row
+
+    return None
+
+
+def _latest_1m_ts() -> Optional[int]:
+    one_m = db.fetch_latest("1m")
+    if one_m is None:
+        return None
+    try:
+        return int(one_m["ts"])
+    except Exception:
+        return None
 
 @app.post("/order")
 @app.post("/api/webhook/tradingview")
@@ -792,11 +1013,20 @@ async def tradingview_webhook(req: Request):
         raise HTTPException(status_code=400, detail="bar_close_confirmed required")
     if VALIDATE_TS_ALIGNMENT and not _is_ts_aligned(ts, tf):
         raise HTTPException(status_code=400, detail="timestamp not aligned to timeframe")
-    print(f"[DEBUG] Upserting: tf={tf}, ts={ts}, price={payload.close}")
+
+    aligned_ts = _align_to_tf_bucket(ts, tf)
+    if aligned_ts != ts:
+        print(f"[DEBUG] Candle bucket align: tf={tf}, raw_ts={ts}, aligned_ts={aligned_ts}")
+        o, h, l, c, v = _merge_payload_to_bucket(tf, aligned_ts, payload)
+    else:
+        o, h, l, c = float(payload.open), float(payload.high), float(payload.low), float(payload.close)
+        v = float(payload.volume) if payload.volume is not None else None
+
+    print(f"[DEBUG] Upserting: tf={tf}, ts={aligned_ts}, price={c}")
     db.upsert_candle(
-        tf, ts,
-        float(payload.open), float(payload.high), float(payload.low), float(payload.close),
-        float(payload.volume) if payload.volume is not None else None,
+        tf, aligned_ts,
+        float(o), float(h), float(l), float(c),
+        v,
         features=payload.features,
     )
     resampled = _resample_from_lower_tf(tf, ts)
@@ -821,8 +1051,12 @@ async def tradingview_webhook(req: Request):
                 _maybe_notify_ready(res_tf, res_ts, payload, force_bar_close=True)
             except Exception as e:
                 print(f"[WARN] Ready notify error (resampled {res_tf}): {type(e).__name__}: {e}")
+    try:
+        _flush_pending_auto_trade_webhooks()
+    except Exception as e:
+        print(f"[WARN] Pending auto-trade flush error: {type(e).__name__}: {e}")
 
-    return {"ok": True, "timeframe": tf, "ts": ts}
+    return {"ok": True, "timeframe": tf, "ts": aligned_ts}
 
 @app.get("/api/candles")
 def candles(tf: str, limit: int = 200):
@@ -830,10 +1064,17 @@ def candles(tf: str, limit: int = 200):
     tf_norm = tf_key(tf) or str(tf).strip()
     if tf_norm not in ("1D", "30m", "60m", "180m"):
         raise HTTPException(status_code=400, detail="unsupported timeframe; use 30,60,180,1D")
-    
+
     rows = db.fetch_recent(tf_norm, limit)
     data = []
+    tf_sec = TIMEFRAME_SECONDS.get(tf_norm)
+    latest_1m = _latest_1m_ts()
     for r in rows:
+        ts = int(r["ts"])
+        if latest_1m is not None and ts > latest_1m:
+            continue
+        if tf_sec is not None and ts % tf_sec != 0:
+            continue
         data.append({
             "ts": int(r["ts"]),
             "open": float(r["open"]),
@@ -842,9 +1083,20 @@ def candles(tf: str, limit: int = 200):
             "close": float(r["close"]),
             "volume": float(r["volume"]) if r["volume"] else 0.0
         })
+
+    if tf_sec is not None:
+        last_raw_ts = int(rows[-1]["ts"]) if rows else None
+        last_ok_ts = data[-1]["ts"] if data else None
+        if last_ok_ts is None or (last_raw_ts is not None and last_ok_ts < last_raw_ts and (last_raw_ts - last_ok_ts) >= tf_sec):
+            rebuilt = _rebuild_tf_from_1m(tf_norm, limit)
+            if rebuilt:
+                data = rebuilt
     partial = _partial_candle_from_1m(tf_norm)
     if partial:
-        data.append(partial)
+        if data and int(data[-1]["ts"]) == int(partial["ts"]):
+            data[-1] = partial
+        else:
+            data.append(partial)
     return {"ok": True, "timeframe": tf_norm, "data": data}
 
 @app.get("/api/recommend")
@@ -884,7 +1136,7 @@ def health():
 def latest():
     out = {}
     for tf in ("1m","5m","15m","1D","30m","60m","180m"):
-        row = db.fetch_latest(tf)
+        row = _latest_for_display_tf(tf)
         out[tf] = {"ts": int(row["ts"]), "close": float(row["close"])} if row else None
     return {"ok": True, "latest": out}
 

@@ -55,7 +55,6 @@ CREATE TABLE IF NOT EXISTS fx_rates (
   source TEXT,
   PRIMARY KEY (base, quote, as_of_date)
 );
-CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date ON fx_rates(base, quote, as_of_date);
 
 CREATE TABLE IF NOT EXISTS pending_auto_trade_webhooks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +64,13 @@ CREATE TABLE IF NOT EXISTS pending_auto_trade_webhooks (
   created_ts INTEGER NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT
+  ,order_name TEXT
+  ,exchange TEXT
+  ,order_side TEXT
+  ,trigger_type TEXT
+  ,trigger_price REAL
+  ,payload_json TEXT
+  ,requires_fx INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -78,6 +84,9 @@ def init_db() -> None:
     try:
         conn.executescript(SCHEMA)
         _migrate_notifications_columns(conn)
+        _migrate_fx_rates_columns(conn)
+        _migrate_pending_auto_trade_webhooks(conn)
+        _ensure_fx_rate_indexes(conn)
         conn.commit()
     finally:
         conn.close()
@@ -104,6 +113,72 @@ def _migrate_notifications_columns(conn: sqlite3.Connection) -> None:
         if col not in existing:
             conn.execute(f"ALTER TABLE notifications ADD COLUMN {col} {col_type}")
 
+
+def _migrate_fx_rates_columns(conn: sqlite3.Connection) -> None:
+    table_row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='fx_rates'"
+    ).fetchone()
+    if table_row is None:
+        return
+
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(fx_rates)").fetchall()}
+    if "as_of_date" not in existing:
+        conn.execute("ALTER TABLE fx_rates ADD COLUMN as_of_date TEXT")
+        if "date" in existing:
+            conn.execute(
+                """
+                UPDATE fx_rates
+                   SET as_of_date = COALESCE(date, strftime('%Y-%m-%d', 'now'))
+                """
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE fx_rates
+                   SET as_of_date = strftime('%Y-%m-%d', 'now')
+                """
+            )
+
+    conn.execute(
+        "UPDATE fx_rates SET as_of_date = strftime('%Y-%m-%d', 'now') WHERE as_of_date IS NULL OR TRIM(as_of_date) = ''"
+    )
+
+
+def _migrate_pending_auto_trade_webhooks(conn: sqlite3.Connection) -> None:
+    table_row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='pending_auto_trade_webhooks'"
+    ).fetchone()
+    if table_row is None:
+        return
+
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(pending_auto_trade_webhooks)").fetchall()}
+    required_columns = {
+        "order_name": "TEXT",
+        "exchange": "TEXT",
+        "order_side": "TEXT",
+        "trigger_type": "TEXT",
+        "trigger_price": "REAL",
+        "payload_json": "TEXT",
+        "requires_fx": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for col, col_type in required_columns.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE pending_auto_trade_webhooks ADD COLUMN {col} {col_type}")
+
+
+def _ensure_fx_rate_indexes(conn: sqlite3.Connection) -> None:
+    table_row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='fx_rates'"
+    ).fetchone()
+    if table_row is None:
+        return
+
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(fx_rates)").fetchall()}
+    if "as_of_date" in existing:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date ON fx_rates(base, quote, as_of_date)")
+    elif "date" in existing:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date ON fx_rates(base, quote, date)")
+
 def upsert_candle(timeframe: str, ts: int, o: float, h: float, l: float, c: float, v: Optional[float], features: Optional[Dict[str, Any]]=None) -> None:
     conn = connect()
     try:
@@ -129,6 +204,17 @@ def fetch_recent(timeframe: str, limit: int) -> List[sqlite3.Row]:
         )
         rows = cur.fetchall()
         return list(reversed(rows))  # ascending
+    finally:
+        conn.close()
+
+def fetch_one(timeframe: str, ts: int) -> Optional[sqlite3.Row]:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            """SELECT * FROM candles WHERE timeframe=? AND ts=? LIMIT 1""",
+            (timeframe, int(ts)),
+        )
+        return cur.fetchone()
     finally:
         conn.close()
 
@@ -285,8 +371,8 @@ def insert_fx_rate(
     conn = connect()
     try:
         now = int(time.time()) if fetched_ts is None else int(fetched_ts)
-        conn.execute(
-            """
+        params = (str(base).upper(), str(quote).upper(), float(rate), str(as_of_date), now, source)
+        insert_sql = """
             INSERT INTO fx_rates (base, quote, rate, as_of_date, fetched_ts, source)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(base, quote, as_of_date)
@@ -294,9 +380,20 @@ def insert_fx_rate(
               rate = excluded.rate,
               fetched_ts = excluded.fetched_ts,
               source = excluded.source
-            """,
-            (str(base).upper(), str(quote).upper(), float(rate), str(as_of_date), now, source),
-        )
+            """
+        try:
+            conn.execute(insert_sql, params)
+        except sqlite3.OperationalError as e:
+            if "ON CONFLICT clause does not match" in str(e):
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO fx_rates (base, quote, rate, as_of_date, fetched_ts, source)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    params,
+                )
+            else:
+                raise
         conn.commit()
     finally:
         conn.close()
@@ -315,28 +412,58 @@ def fetch_latest_fx_rate(base: str, quote: str) -> Optional[sqlite3.Row]:
     finally:
         conn.close()
 
-def insert_pending_upbit_auto_trade(side: str, entry_price: float, tp_price: float, created_ts: Optional[int] = None) -> int:
+def insert_pending_auto_trade(
+    side: str,
+    order_name: str,
+    order_side: str,
+    exchange: str,
+    trigger_type: str,
+    trigger_price: float,
+    payload_json: str,
+    requires_fx: bool = False,
+    created_ts: Optional[int] = None,
+    entry_price: Optional[float] = None,
+    tp_price: Optional[float] = None,
+) -> int:
     conn = connect()
     try:
         ts = int(time.time()) if created_ts is None else int(created_ts)
+        entry_value = float(entry_price if entry_price is not None else trigger_price)
+        tp_value = float(tp_price if tp_price is not None else trigger_price)
         cur = conn.execute(
             """
-            INSERT INTO pending_auto_trade_webhooks (side, entry_price, tp_price, created_ts, attempts, last_error)
-            VALUES (?, ?, ?, ?, 0, NULL)
+            INSERT INTO pending_auto_trade_webhooks (
+              side, entry_price, tp_price, created_ts, attempts, last_error,
+              order_name, exchange, order_side, trigger_type, trigger_price, payload_json, requires_fx
+            )
+            VALUES (?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (str(side).lower(), float(entry_price), float(tp_price), ts),
+            (
+                str(side).lower(),
+                float(entry_value),
+                float(tp_value),
+                ts,
+                str(order_name),
+                str(exchange),
+                str(order_side),
+                str(trigger_type),
+                float(trigger_price),
+                payload_json,
+                1 if requires_fx else 0,
+            ),
         )
         conn.commit()
         return int(cur.lastrowid)
     finally:
         conn.close()
 
-def fetch_pending_upbit_auto_trades(limit: int = 100) -> List[sqlite3.Row]:
+def fetch_pending_auto_trades(limit: int = 100) -> List[sqlite3.Row]:
     conn = connect()
     try:
         cur = conn.execute(
             """
-            SELECT id, side, entry_price, tp_price, created_ts, attempts
+            SELECT id, side, entry_price, tp_price, created_ts, attempts, last_error,
+                   order_name, exchange, order_side, trigger_type, trigger_price, payload_json, requires_fx
               FROM pending_auto_trade_webhooks
              WHERE attempts < 10
              ORDER BY created_ts ASC, id ASC
@@ -348,7 +475,7 @@ def fetch_pending_upbit_auto_trades(limit: int = 100) -> List[sqlite3.Row]:
     finally:
         conn.close()
 
-def delete_pending_upbit_auto_trade(pending_id: int) -> None:
+def delete_pending_auto_trade(pending_id: int) -> None:
     conn = connect()
     try:
         conn.execute(
@@ -359,7 +486,7 @@ def delete_pending_upbit_auto_trade(pending_id: int) -> None:
     finally:
         conn.close()
 
-def bump_pending_upbit_auto_trade(pending_id: int, last_error: str) -> None:
+def bump_pending_auto_trade(pending_id: int, last_error: str) -> None:
     conn = connect()
     try:
         conn.execute(

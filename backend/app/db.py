@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS pending_auto_trade_webhooks (
   ,trigger_price REAL
   ,payload_json TEXT
   ,requires_fx INTEGER NOT NULL DEFAULT 0
+  ,batch_id INTEGER
 );
 """
 
@@ -160,10 +161,12 @@ def _migrate_pending_auto_trade_webhooks(conn: sqlite3.Connection) -> None:
         "trigger_price": "REAL",
         "payload_json": "TEXT",
         "requires_fx": "INTEGER NOT NULL DEFAULT 0",
+        "batch_id": "INTEGER",
     }
     for col, col_type in required_columns.items():
         if col not in existing:
             conn.execute(f"ALTER TABLE pending_auto_trade_webhooks ADD COLUMN {col} {col_type}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_auto_trade_webhooks_batch ON pending_auto_trade_webhooks(batch_id, trigger_type, exchange, side)")
 
 
 def _ensure_fx_rate_indexes(conn: sqlite3.Connection) -> None:
@@ -424,6 +427,7 @@ def insert_pending_auto_trade(
     created_ts: Optional[int] = None,
     entry_price: Optional[float] = None,
     tp_price: Optional[float] = None,
+    batch_id: Optional[int] = None,
 ) -> int:
     conn = connect()
     try:
@@ -434,9 +438,9 @@ def insert_pending_auto_trade(
             """
             INSERT INTO pending_auto_trade_webhooks (
               side, entry_price, tp_price, created_ts, attempts, last_error,
-              order_name, exchange, order_side, trigger_type, trigger_price, payload_json, requires_fx
+              order_name, exchange, order_side, trigger_type, trigger_price, payload_json, requires_fx, batch_id
             )
-            VALUES (?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(side).lower(),
@@ -450,6 +454,7 @@ def insert_pending_auto_trade(
                 float(trigger_price),
                 payload_json,
                 1 if requires_fx else 0,
+                None if batch_id is None else int(batch_id),
             ),
         )
         conn.commit()
@@ -463,7 +468,7 @@ def fetch_pending_auto_trades(limit: int = 100) -> List[sqlite3.Row]:
         cur = conn.execute(
             """
             SELECT id, side, entry_price, tp_price, created_ts, attempts, last_error,
-                   order_name, exchange, order_side, trigger_type, trigger_price, payload_json, requires_fx
+                   order_name, exchange, order_side, trigger_type, trigger_price, payload_json, requires_fx, batch_id
               FROM pending_auto_trade_webhooks
              WHERE attempts < 10
              ORDER BY created_ts ASC, id ASC
@@ -475,6 +480,22 @@ def fetch_pending_auto_trades(limit: int = 100) -> List[sqlite3.Row]:
     finally:
         conn.close()
 
+def prune_pending_auto_trades(older_than_seconds: int = 86400) -> int:
+    conn = connect()
+    try:
+        cutoff = int(time.time()) - int(older_than_seconds)
+        cur = conn.execute(
+            """
+            DELETE FROM pending_auto_trade_webhooks
+             WHERE created_ts < ?
+            """,
+            (cutoff,),
+        )
+        conn.commit()
+        return int(cur.rowcount)
+    finally:
+        conn.close()
+
 def delete_pending_auto_trade(pending_id: int) -> None:
     conn = connect()
     try:
@@ -483,6 +504,25 @@ def delete_pending_auto_trade(pending_id: int) -> None:
             (int(pending_id),),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+def has_pending_entry_in_batch(batch_id: int, side: str, exchange: str) -> bool:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            """
+            SELECT 1
+              FROM pending_auto_trade_webhooks
+             WHERE batch_id = ?
+               AND side = ?
+               AND exchange = ?
+               AND trigger_type = 'entry'
+             LIMIT 1
+            """,
+            (int(batch_id), str(side).lower(), str(exchange)),
+        )
+        return cur.fetchone() is not None
     finally:
         conn.close()
 

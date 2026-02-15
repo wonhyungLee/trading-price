@@ -57,6 +57,7 @@ AUTO_TRADE_READY_TP = {
     "B": "tp2_price",
     "C": "tp1_price",
 }
+AUTO_TRADE_PENDING_TTL_SEC = 24 * 60 * 60
 def _to_float(value: Any) -> Optional[float]:
     try:
         return float(value)
@@ -75,6 +76,21 @@ def _to_trade_price(value: Any) -> str:
         return f"{float(value):.2f}"
     except Exception:
         return str(value)
+
+def _order_payload_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    if "password" not in payload:
+        return dict(payload)
+    ordered: Dict[str, Any] = {}
+    ordered["password"] = payload["password"]
+    if "exchange" in payload:
+        ordered["exchange"] = payload["exchange"]
+    for key, value in payload.items():
+        if key in ("password", "exchange"):
+            continue
+        ordered[key] = value
+    return ordered
 
 def _get_usdkrw_fx_rate() -> Optional[float]:
     row = db.fetch_latest_fx_rate(WONYODD_FX_RATE_BASE, WONYODD_FX_RATE_QUOTE)
@@ -265,11 +281,11 @@ def _build_okx_auto_trade_order_tasks(
 
     common = {
         "password": "dldnjsgud",
+        "exchange": "OKX",
         "base": "BTC",
         "quote": "USDT.P",
         "type": "limit",
         "amount": "0.01",
-        "percent": "NaN",
         "leverage": "50",
         "margin_mode": "cross",
     }
@@ -434,22 +450,40 @@ def _queue_auto_trade_orders(rec: Dict[str, Any]) -> list[Dict[str, Any]]:
     if not orders:
         return []
 
+    batch_id = int(time.time_ns())
     queued: list[Dict[str, Any]] = []
     for order in orders:
         try:
             order_name = str(order["order_name"])
-            payload_json = json.dumps(order["payload"], ensure_ascii=False)
+            payload_obj = order["payload"] if isinstance(order.get("payload"), dict) else {}
+            exchange = str(order.get("exchange") or payload_obj.get("exchange") or "").strip()
+            if not exchange:
+                exchange = "UNKNOWN"
+                print(
+                    "[WARN] Auto-trade order missing exchange; forced UNKNOWN: "
+                    + json.dumps(
+                        {
+                            "order_name": order_name,
+                            "side": side,
+                            "order_side": str(order.get("order_side")),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            payload_obj = dict(payload_obj)
+            payload_obj["exchange"] = exchange
             queued_id = db.insert_pending_auto_trade(
                 side=side,
                 order_name=order_name,
                 order_side=str(order["order_side"]),
-                exchange=str(order["exchange"]),
+                exchange=exchange,
                 trigger_type=str(order["trigger_type"]),
                 trigger_price=float(order["trigger_price"]),
-                payload_json=payload_json,
+                payload_json=json.dumps(_order_payload_fields(payload_obj), ensure_ascii=False),
                 requires_fx=bool(order.get("requires_fx")),
                 entry_price=_to_float(plan.get("entry_price")),
                 tp_price=tp_price,
+                batch_id=batch_id,
             )
         except Exception as e:
             print(f"[WARN] Auto-trade queue insert failed: {type(e).__name__}:{e}")
@@ -458,7 +492,13 @@ def _queue_auto_trade_orders(rec: Dict[str, Any]) -> list[Dict[str, Any]]:
         print(
             "[INFO] Auto-trade queued: "
             + json.dumps(
-                {"id": queued_id, "order_name": order_name, "exchange": order.get("exchange"), "trigger_type": order.get("trigger_type")},
+                {
+                    "id": queued_id,
+                    "batch_id": batch_id,
+                    "order_name": order_name,
+                    "exchange": exchange,
+                    "trigger_type": order.get("trigger_type"),
+                },
                 ensure_ascii=False,
             )
         )
@@ -493,19 +533,25 @@ def _build_pending_payload_from_row(row: sqlite3.Row, fx_rate: Optional[float]) 
         price_usd = payload.pop("price_usd", None)
         if price_usd is None:
             if "price" in payload:
-                return payload, None
+                return _order_payload_fields(payload), None
             return None, "missing_upbit_price_usd"
         try:
             payload["price"] = _to_trade_price(float(price_usd) * float(fx_rate))
         except Exception:
             return None, "invalid_upbit_price_usd"
         payload.pop("price_usd", None)
-    return payload, None
+    if str(row["exchange"] or "").upper() == "OKX":
+        payload.pop("percent", None)
+    return _order_payload_fields(payload), None
 
 
 def _flush_pending_auto_trade_webhooks(fx_rate: Optional[float] = None) -> int:
     if fx_rate is None:
         fx_rate = _resolve_usdkrw_fx_rate()
+
+    expired = db.prune_pending_auto_trades(older_than_seconds=AUTO_TRADE_PENDING_TTL_SEC)
+    if expired:
+        print(f"[INFO] Expired pending auto-trade webhooks removed: count={expired}")
 
     latest_1m = db.fetch_latest("1m")
     if latest_1m is None:
@@ -522,6 +568,26 @@ def _flush_pending_auto_trade_webhooks(fx_rate: Optional[float] = None) -> int:
         if trigger is None:
             db.bump_pending_auto_trade(pid, "invalid_trigger_price")
             continue
+        trigger_type = str(row["trigger_type"] or "").strip().lower()
+        batch_id = row["batch_id"]
+        if trigger_type == "tp" and batch_id is not None:
+            side = str(row["side"] or "")
+            exchange = str(row["exchange"] or "")
+            if db.has_pending_entry_in_batch(int(batch_id), side, exchange):
+                print(
+                    "[DEBUG] Pending auto-trade wait_entry_first: "
+                    + json.dumps(
+                        {
+                            "id": pid,
+                            "batch_id": batch_id,
+                            "order_name": row["order_name"],
+                            "exchange": exchange,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                continue
+
         if not _trigger_price_hit(trigger, latest_1m):
             continue
 
@@ -542,6 +608,20 @@ def _flush_pending_auto_trade_webhooks(fx_rate: Optional[float] = None) -> int:
             sent_count += 1
             print(f"[INFO] Pending auto-trade webhook sent and removed: id={pid}, order_name={row['order_name']}")
         else:
+            if detail.startswith("http_"):
+                print(
+                    "[WARN] Pending auto-trade webhook failed: "
+                    + json.dumps(
+                        {
+                            "id": pid,
+                            "exchange": row["exchange"],
+                            "order_name": row["order_name"],
+                            "detail": detail,
+                            "payload": payload,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
             db.bump_pending_auto_trade(pid, detail)
     return sent_count
 

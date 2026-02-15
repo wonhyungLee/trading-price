@@ -56,6 +56,8 @@ AUTO_TRADE_READY_TP = {
     "B": "tp2_price",
     "C": "tp1_price",
 }
+READY_RULE_NOTIFY_SET = {"A", "B", "C", "D"}
+READY_RULE_AUTO_TRADE_SET = {"A", "B", "C"}
 
 app = FastAPI(title="Wonyodd Reco Engine", version="1.0.0")
 db.init_db()
@@ -138,6 +140,30 @@ def _auto_trade_order_sides(side: str) -> tuple[str, str, str, str]:
         return "entry/sell", "close/buy", "숏OKX", "숏마감OKX"
     raise ValueError("side must be long or short")
 
+def _resolve_ready_rule(selected: dict, plan: dict) -> tuple[str, Optional[float]]:
+    rule = selected.get("ready_rule", plan.get("ready_rule"))
+    rule_norm = str(rule).strip().upper() if rule else "-"
+    if rule_norm not in ("A", "B", "C", "D"):
+        rule_norm = "-"
+
+    sma_distance_pct = selected.get("sma_distance_pct", plan.get("sma_distance_pct"))
+    atr_pct = selected.get("atr_pct", plan.get("atr_pct"))
+    rule_mdd = selected.get("ready_rule_mdd_pct", plan.get("ready_rule_mdd_pct"))
+
+    if sma_distance_pct is not None and atr_pct is not None:
+        resolved_rule, resolved_mdd = resolve_ready_rule(sma_distance_pct, atr_pct)
+        if resolved_rule in ("A", "B", "C", "D"):
+            rule_norm = resolved_rule
+            if resolved_mdd is not None:
+                rule_mdd = resolved_mdd
+            selected["ready_rule"] = resolved_rule
+            plan["ready_rule"] = resolved_rule
+            if resolved_mdd is not None:
+                selected["ready_rule_mdd_pct"] = resolved_mdd
+                plan["ready_rule_mdd_pct"] = resolved_mdd
+
+    return rule_norm, rule_mdd
+
 def _build_auto_trade_payloads(rec: Dict[str, Any], fx_rate: Optional[float] = None) -> list[Dict[str, Any]]:
     plan = rec.get("plan") or {}
     selected = rec.get("selected") or {}
@@ -148,8 +174,11 @@ def _build_auto_trade_payloads(rec: Dict[str, Any], fx_rate: Optional[float] = N
     if side not in ("long", "short"):
         return []
 
-    rule = str(selected.get("ready_rule", plan.get("ready_rule", ""))).strip().upper()
-    tp_key = AUTO_TRADE_READY_TP.get(rule)
+    rule_norm, _ = _resolve_ready_rule(selected, plan)
+    if rule_norm not in READY_RULE_AUTO_TRADE_SET:
+        return []
+
+    tp_key = AUTO_TRADE_READY_TP.get(rule_norm)
     if tp_key is None:
         return []
 
@@ -158,6 +187,18 @@ def _build_auto_trade_payloads(rec: Dict[str, Any], fx_rate: Optional[float] = N
     if entry_price is None or tp_price is None:
         return []
 
+    payloads = _build_okx_auto_trade_payloads(side, entry_price, tp_price)
+
+    if fx_rate is not None:
+        payloads.extend(_build_upbit_auto_trade_payloads(side, entry_price, tp_price, fx_rate))
+    return payloads
+
+
+def _build_okx_auto_trade_payloads(
+    side: str,
+    entry_price: Any,
+    tp_price: Any,
+) -> list[Dict[str, Any]]:
     entry_side, close_side, entry_name, close_name = _auto_trade_order_sides(side)
     common = {
         "password": "dldnjsgud",
@@ -170,7 +211,7 @@ def _build_auto_trade_payloads(rec: Dict[str, Any], fx_rate: Optional[float] = N
         "leverage": "50",
         "margin_mode": "cross",
     }
-    payloads = [
+    return [
         {
             **common,
             "side": entry_side,
@@ -185,9 +226,6 @@ def _build_auto_trade_payloads(rec: Dict[str, Any], fx_rate: Optional[float] = N
         },
     ]
 
-    if fx_rate is not None:
-        payloads.extend(_build_upbit_auto_trade_payloads(side, entry_price, tp_price, fx_rate))
-    return payloads
 
 def _build_upbit_auto_trade_payloads(
     side: str,
@@ -195,6 +233,9 @@ def _build_upbit_auto_trade_payloads(
     tp_price: Any,
     fx_rate: float,
 ) -> list[Dict[str, Any]]:
+    side_norm = str(side).strip().lower()
+    if side_norm != "long":
+        return []
     try:
         entry_krw = _to_trade_price(float(entry_price) * float(fx_rate))
         tp_krw = _to_trade_price(float(tp_price) * float(fx_rate))
@@ -269,10 +310,10 @@ def _enqueue_pending_upbit_trade(rec: Dict[str, Any]) -> bool:
         side = str(plan.get("side") or rec.get("side") or "").strip().lower()
     except Exception:
         side = ""
-    if side not in ("long", "short"):
+    if side != "long":
         return False
 
-    rule = str(selected.get("ready_rule", plan.get("ready_rule", ""))).strip().upper()
+    rule, _ = _resolve_ready_rule(selected, plan)
     tp_key = AUTO_TRADE_READY_TP.get(rule)
     if tp_key is None:
         return False
@@ -304,6 +345,9 @@ def _flush_pending_upbit_webhooks(fx_rate: Optional[float] = None) -> int:
     for row in pending_rows:
         pid = int(row["id"])
         side = str(row["side"])
+        if side != "long":
+            db.bump_pending_upbit_auto_trade(pid, "invalid_side")
+            continue
         entry = row["entry_price"]
         tp = row["tp_price"]
         upbit_payloads = _build_upbit_auto_trade_payloads(side, entry, tp, fx_rate)
@@ -502,7 +546,13 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
     for side, rec in recs:
         if not rec or not rec.get("ok"):
             continue
-        if (rec.get("selected") or {}).get("status") != "ready":
+        selected = rec.get("selected") or {}
+        plan = rec.get("plan") or {}
+        rule_norm, rule_mdd = _resolve_ready_rule(selected, plan)
+        if selected.get("status") != "ready":
+            continue
+        if rule_norm not in READY_RULE_NOTIFY_SET:
+            print(f"[DEBUG] Ready notify skipped (rule={rule_norm})")
             continue
 
         kind = f"ready:{tf}:{side}"
@@ -523,9 +573,10 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
         ok, detail = send_discord_webhook(msg)
         print(f"[DEBUG] Ready notify: ok={ok} detail={detail}")
         auto_trade_results = []
-        if ok:
+        should_auto_trade = rule_norm in READY_RULE_AUTO_TRADE_SET
+        if ok and should_auto_trade:
             fx_rate = _resolve_usdkrw_fx_rate()
-            if fx_rate is None:
+            if fx_rate is None and str(side).strip().lower() == "long":
                 queued = _enqueue_pending_upbit_trade(rec)
                 print(f"[WARN] USD/KRW 환율이 없어 업비트 풀매수/풀매도 전송을 생략합니다. queued={queued}")
                 if queued:
@@ -568,6 +619,14 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
                     },
                     ensure_ascii=False,
                 ),
+                entry_price=plan.get("entry_price"),
+                recommended_price=plan.get(AUTO_TRADE_READY_TP.get(rule_norm)) if should_auto_trade else None,
+                tp1_price=plan.get("tp1_price"),
+                tp2_price=plan.get("tp2_price"),
+                tp3_price=plan.get("tp3_price"),
+                ready_rule=rule_norm if rule_norm != "-" else None,
+                ready_rule_mdd_pct=rule_mdd,
+                status=selected.get("status", plan.get("status")),
             )
 
 def _parse_ts(payload: WebhookPayload) -> int:
@@ -595,22 +654,7 @@ def _parse_ts(payload: WebhookPayload) -> int:
 def _ready_notify_content(rec: dict) -> str:
     selected = (rec or {}).get("selected") or {}
     plan = (rec or {}).get("plan") or {}
-    rule = selected.get("ready_rule", plan.get("ready_rule"))
-    rule_norm = str(rule).strip().upper() if rule else ""
-    if rule_norm not in ("A", "B", "C", "D"):
-        rule_norm = "-"
-
-    sma_distance_pct = selected.get("sma_distance_pct")
-    atr_pct = selected.get("atr_pct")
-    if sma_distance_pct is not None and atr_pct is not None:
-        resolved_rule, resolved_mdd = resolve_ready_rule(sma_distance_pct, atr_pct)
-        if resolved_rule in ("A", "B", "C", "D"):
-            rule_norm = resolved_rule
-            plan["ready_rule"] = resolved_rule
-            selected["ready_rule"] = resolved_rule
-            if resolved_mdd is not None:
-                plan["ready_rule_mdd_pct"] = resolved_mdd
-                selected["ready_rule_mdd_pct"] = resolved_mdd
+    rule_norm, _ = _resolve_ready_rule(selected, plan)
 
     if rule_norm in ("A", "B", "C", "D"):
         return f"READY신호->추천({rule_norm})"

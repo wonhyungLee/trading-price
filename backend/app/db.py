@@ -27,6 +27,14 @@ CREATE TABLE IF NOT EXISTS notifications (
   ts INTEGER NOT NULL,
   created_ts INTEGER NOT NULL,
   detail TEXT,
+  entry_price REAL,
+  recommended_price REAL,
+  tp1_price REAL,
+  tp2_price REAL,
+  tp3_price REAL,
+  ready_rule TEXT,
+  ready_rule_mdd_pct REAL,
+  status TEXT,
   PRIMARY KEY (kind, timeframe, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_kind_created ON notifications(kind, created_ts);
@@ -69,9 +77,32 @@ def init_db() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        _migrate_notifications_columns(conn)
         conn.commit()
     finally:
         conn.close()
+
+def _migrate_notifications_columns(conn: sqlite3.Connection) -> None:
+    table_row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='notifications'"
+    ).fetchone()
+    if table_row is None:
+        return
+
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(notifications)").fetchall()}
+    required_columns = {
+        "entry_price": "REAL",
+        "recommended_price": "REAL",
+        "tp1_price": "REAL",
+        "tp2_price": "REAL",
+        "tp3_price": "REAL",
+        "ready_rule": "TEXT",
+        "ready_rule_mdd_pct": "REAL",
+        "status": "TEXT",
+    }
+    for col, col_type in required_columns.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE notifications ADD COLUMN {col} {col_type}")
 
 def upsert_candle(timeframe: str, ts: int, o: float, h: float, l: float, c: float, v: Optional[float], features: Optional[Dict[str, Any]]=None) -> None:
     conn = connect()
@@ -154,13 +185,45 @@ def fetch_latest_notification(kind: str) -> Optional[sqlite3.Row]:
     finally:
         conn.close()
 
-def insert_notification(kind: str, timeframe: str, ts: int, created_ts: int, detail: Optional[str] = None) -> bool:
+def insert_notification(
+    kind: str,
+    timeframe: str,
+    ts: int,
+    created_ts: int,
+    detail: Optional[str] = None,
+    entry_price: Optional[float] = None,
+    recommended_price: Optional[float] = None,
+    tp1_price: Optional[float] = None,
+    tp2_price: Optional[float] = None,
+    tp3_price: Optional[float] = None,
+    ready_rule: Optional[str] = None,
+    ready_rule_mdd_pct: Optional[float] = None,
+    status: Optional[str] = None,
+) -> bool:
     conn = connect()
     try:
         cur = conn.execute(
-            """INSERT OR IGNORE INTO notifications(kind, timeframe, ts, created_ts, detail)
-               VALUES (?, ?, ?, ?, ?)""",
-            (kind, timeframe, int(ts), int(created_ts), detail),
+            """INSERT OR IGNORE INTO notifications(
+                   kind, timeframe, ts, created_ts, detail,
+                   entry_price, recommended_price, tp1_price, tp2_price, tp3_price,
+                   ready_rule, ready_rule_mdd_pct, status
+               )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                kind,
+                timeframe,
+                int(ts),
+                int(created_ts),
+                detail,
+                entry_price,
+                recommended_price,
+                tp1_price,
+                tp2_price,
+                tp3_price,
+                ready_rule,
+                ready_rule_mdd_pct,
+                status,
+            ),
         )
         conn.commit()
         return bool(cur.rowcount)

@@ -1,12 +1,128 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { fetchCandles, fetchLatest, fetchRecommend, notifyRecommend, type Candle, type Scenario } from './api';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  fetchCandles,
+  fetchCoupangInlineLinks,
+  fetchLatest,
+  fetchRecommend,
+  notifyRecommend,
+  type Candle,
+  type CoupangInlineItem,
+  type Scenario,
+} from './api';
 import PriceChart from './components/PriceChart';
 import GlossaryModal from './components/GlossaryModal';
 
 type Side = 'long' | 'short';
 
-const BANNER_COOLDOWN_MS = 6 * 60 * 60 * 1000;
-const BANNER_COOLDOWN_KEY = 'cpb_cooldown_until';
+const INLINE_PROMO_LIMIT = 8;
+const TF_SECONDS: Record<string, number> = {
+  '30m': 30 * 60,
+  '60m': 60 * 60,
+  '180m': 180 * 60,
+};
+
+function normalizeCandles(candles: Candle[], timeframe: string): Candle[] {
+  const tfSec = TF_SECONDS[timeframe];
+  if (!Array.isArray(candles) || candles.length === 0) {
+    return [];
+  }
+
+  const rows = candles
+    .map((c) => ({
+      ts: Number(c.ts),
+      open: Number(c.open),
+      high: Number(c.high),
+      low: Number(c.low),
+      close: Number(c.close),
+      volume: c.volume == null ? 0 : Number(c.volume),
+      is_partial: c.is_partial,
+    }))
+    .filter((c) =>
+      Number.isFinite(c.ts) &&
+      Number.isFinite(c.open) &&
+      Number.isFinite(c.high) &&
+      Number.isFinite(c.low) &&
+      Number.isFinite(c.close),
+    )
+    .sort((a, b) => a.ts - b.ts);
+
+  if (rows.length === 0) return [];
+
+  const deduped: Candle[] = [];
+  for (const c of rows) {
+    const last = deduped[deduped.length - 1];
+    if (!last || last.ts !== c.ts) {
+      deduped.push({
+        ts: c.ts,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: Number.isFinite(c.volume) ? c.volume : 0,
+        is_partial: c.is_partial,
+      });
+      continue;
+    }
+    last.close = c.close;
+    last.high = Math.max(last.high, c.high);
+    last.low = Math.min(last.low, c.low);
+    last.volume = Number.isFinite(c.volume) ? (Number(last.volume ?? 0) + c.volume) : Number(last.volume ?? 0);
+    last.is_partial = c.is_partial ?? last.is_partial;
+  }
+
+  if (!tfSec) {
+    return deduped;
+  }
+
+  const deltas = [];
+  for (let i = 1; i < deduped.length; i++) {
+    const d = deduped[i].ts - deduped[i - 1].ts;
+    if (d > 0 && d < 24 * 60 * 60) {
+      deltas.push(d);
+    }
+  }
+  if (deltas.length === 0) {
+    return deduped;
+  }
+  deltas.sort((a, b) => a - b);
+  const median = deltas[Math.floor(deltas.length / 2)];
+
+  // If most bars are much shorter than timeframe (예: 1m 데이터가 30m으로 섞인 경우),
+  // 해당 프레임 기준으로 봉을 재집계해서 그리기 안정성을 확보한다.
+  if (median >= tfSec * 0.9 && median <= tfSec * 1.1) {
+    return deduped;
+  }
+
+  const normalized: Candle[] = [];
+  let bucket: Candle | null = null;
+  for (const c of deduped) {
+    const bucketTs = c.ts - (c.ts % tfSec);
+    if (!bucket || bucket.ts !== bucketTs) {
+      if (bucket) normalized.push(bucket);
+      bucket = {
+        ts: bucketTs,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: Number.isFinite(c.volume) ? c.volume : 0,
+        is_partial: c.is_partial,
+      };
+      continue;
+    }
+    bucket.high = Math.max(bucket.high, c.high);
+    bucket.low = Math.min(bucket.low, c.low);
+    bucket.close = c.close;
+    const bucketVolume = typeof bucket.volume === 'number' ? bucket.volume : 0;
+    const addVolume = typeof c.volume === 'number' ? c.volume : 0;
+    bucket.volume = bucketVolume + addVolume;
+    bucket.is_partial = bucket.is_partial || c.is_partial;
+  }
+  if (bucket) normalized.push(bucket);
+
+  return normalized;
+}
+
 const READY_RULE_INFO: Record<
   string,
   { title: string; desc: string; recommendedTp: 'TP1' | 'TP2' | '-'; noStop: boolean }
@@ -36,16 +152,6 @@ const READY_RULE_INFO: Record<
     noStop: false,
   },
 };
-
-function readBannerCooldown(): number {
-  try {
-    const raw = localStorage.getItem(BANNER_COOLDOWN_KEY);
-    const parsed = raw ? Number(raw) : 0;
-    return Number.isFinite(parsed) ? parsed : 0;
-  } catch {
-    return 0;
-  }
-}
 
 function fmt(x: any): string {
   const n = Number(x);
@@ -109,10 +215,8 @@ export default function App() {
   const [glossaryOpen, setGlossaryOpen] = useState(false);
   const [glossaryQuery, setGlossaryQuery] = useState<string>('');
 
-  const [bannerOpen, setBannerOpen] = useState(false);
-  const [bannerCooldownUntil, setBannerCooldownUntil] = useState<number>(() => readBannerCooldown());
-  const bannerGridRef = useRef<HTMLDivElement | null>(null);
-  const bannerSubtitleRef = useRef<HTMLParagraphElement | null>(null);
+  const [inlinePromoItems, setInlinePromoItems] = useState<CoupangInlineItem[]>([]);
+  const [inlinePromoMessage, setInlinePromoMessage] = useState<string>('');
 
   const [fontBasePx, setFontBasePx] = useState<number>(() => {
     try {
@@ -161,22 +265,6 @@ export default function App() {
   function openGlossary(term?: string) {
     setGlossaryQuery(term ?? '');
     setGlossaryOpen(true);
-  }
-
-  function startBannerCooldown() {
-    const until = Date.now() + BANNER_COOLDOWN_MS;
-    setBannerCooldownUntil(until);
-    try {
-      localStorage.setItem(BANNER_COOLDOWN_KEY, String(until));
-    } catch {
-      // ignore
-    }
-    setBannerOpen(false);
-  }
-
-  function openBannerIfAllowed() {
-    if (Date.now() < bannerCooldownUntil) return;
-    setBannerOpen(true);
   }
 
   function Term({ label, term }: { label: string; term: string }) {
@@ -285,35 +373,27 @@ export default function App() {
   }, [fontBasePx]);
 
   useEffect(() => {
-    if (!bannerOpen) return;
-    const cpb = (window as any).CoupangPartnersBanner;
-    if (!cpb?.load) return;
-    const apiBase = (import.meta as any).env?.VITE_API_BASE ?? '';
-    cpb.load({
-      container: bannerGridRef.current,
-      subtitle: bannerSubtitleRef.current,
-      endpoint: `${apiBase}/api/coupang-banner`,
-      defaultSubtitle: '지금 필요한 정리/금융 아이템을 추천합니다.',
-      emptyMessage: '추천 상품을 불러오지 못했습니다.',
-    });
-  }, [bannerOpen]);
+    let cancelled = false;
 
-  useEffect(() => {
-    if (!bannerOpen) return;
-    const container = bannerGridRef.current;
-    if (!container) return;
-
-    const handleClick = (event: MouseEvent) => {
-      const target = event.target as HTMLElement | null;
-      const card = target?.closest?.('.cpb-card');
-      if (card) {
-        startBannerCooldown();
+    const loadInlinePromo = async () => {
+      try {
+        const payload = await fetchCoupangInlineLinks(INLINE_PROMO_LIMIT);
+        if (cancelled) return;
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        setInlinePromoItems(items);
+        setInlinePromoMessage(items.length ? '' : (payload?.message || '쿠팡 광고 링크를 불러오지 못했습니다.'));
+      } catch {
+        if (cancelled) return;
+        setInlinePromoItems([]);
+        setInlinePromoMessage('쿠팡 광고 링크를 불러오지 못했습니다.');
       }
     };
 
-    container.addEventListener('click', handleClick);
-    return () => container.removeEventListener('click', handleClick);
-  }, [bannerOpen, bannerCooldownUntil]);
+    loadInlinePromo();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Initial load
   useEffect(() => {
@@ -378,7 +458,7 @@ export default function App() {
 
       try {
         const c = await fetchCandles(chartTf, 5000);
-        if (!cancelled) setCandles(c.candles ?? []);
+        if (!cancelled) setCandles(normalizeCandles(c.candles ?? [], chartTf));
       } catch {
         // ignore
       }
@@ -412,59 +492,6 @@ export default function App() {
 
   return (
     <>
-      {bannerOpen ? (
-        <div className="cpbOverlay" role="dialog" aria-modal="true" aria-label="추천 상품 배너">
-          <div className="cpbModal">
-            <button
-              className="cpbClose"
-              onClick={(e) => {
-                e.stopPropagation();
-                const firstCard = bannerGridRef.current?.querySelector('.cpb-card') as HTMLAnchorElement | null;
-                const href = firstCard?.getAttribute?.('href');
-                if (href) {
-                  window.open(href, '_blank', 'noopener');
-                }
-                startBannerCooldown();
-              }}
-              aria-label="닫기"
-            >
-              ×
-            </button>
-            <div className="cpbHeader">
-              <div className="cpbTitle">추천 상품</div>
-              <p className="cpbSubtitle" ref={bannerSubtitleRef}>
-                방문자 관심 로그를 반영해 필요한 상품을 추천합니다.
-              </p>
-            </div>
-            <div className="cpb-grid cpbGrid" ref={bannerGridRef}>
-              <div className="cpb-card cpb-card--skeleton">
-                <div className="cpb-thumb"></div>
-                <div className="cpb-lines">
-                  <span></span>
-                  <span></span>
-                </div>
-              </div>
-              <div className="cpb-card cpb-card--skeleton">
-                <div className="cpb-thumb"></div>
-                <div className="cpb-lines">
-                  <span></span>
-                  <span></span>
-                </div>
-              </div>
-              <div className="cpb-card cpb-card--skeleton">
-                <div className="cpb-thumb"></div>
-                <div className="cpb-lines">
-                  <span></span>
-                  <span></span>
-                </div>
-              </div>
-            </div>
-            <p className="cpbDisclosure">
-              이 포스팅은 쿠팡파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
-            </p>
-          </div>
-        </div>
-      ) : null}
       <header className="topBar">
         <div className="wrap topBarInner">
           <div className="brand">
@@ -480,7 +507,6 @@ export default function App() {
                 className={`segBtn ${side === 'long' ? 'segBtnActiveLong' : ''}`}
                 onClick={() => {
                   setSide('long');
-                  openBannerIfAllowed();
                   runRecommend('long');
                 }}
                 disabled={busy}
@@ -491,7 +517,6 @@ export default function App() {
                 className={`segBtn ${side === 'short' ? 'segBtnActiveShort' : ''}`}
                 onClick={() => {
                   setSide('short');
-                  openBannerIfAllowed();
                   runRecommend('short');
                 }}
                 disabled={busy}
@@ -525,6 +550,15 @@ export default function App() {
               rel="noopener noreferrer"
             >
               디스코드 알람받기
+            </a>
+
+            <a
+              className="btn controlOkx"
+              href="https://okx.com/join/84237472"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              OKX 가입
             </a>
 
             <div className="fontControls controlFont">
@@ -600,14 +634,24 @@ export default function App() {
               <div className="priceHeader">
                 <div className="priceTopRow">
                   <div className="priceNow">{fmt(lastPrice)}</div>
-                  <a
-                    className="btn discordCtaMobile"
-                    href="https://discord.gg/cAPcXQh7K"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    디스코드 알람받기
-                  </a>
+                  <div className="mobileQuickLinks">
+                    <a
+                      className="btn discordCtaMobile"
+                      href="https://discord.gg/cAPcXQh7K"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      디스코드 알람
+                    </a>
+                    <a
+                      className="btn okxCtaMobile"
+                      href="https://okx.com/join/84237472"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      OKX 가입
+                    </a>
+                  </div>
                 </div>
                 {priceDeltaPct !== null ? (
                   <div className={`priceDelta ${priceDeltaPct >= 0 ? 'up' : 'down'}`}>
@@ -673,6 +717,36 @@ export default function App() {
                 </div>
               </div>
             </div>
+
+            <section className="inlinePromoBox" aria-label="쿠팡 프로모션">
+              <div className="inlinePromoHead">
+                <div className="inlinePromoTitle">쿠팡 프로모션</div>
+                <div className="inlinePromoSub">메인 결과/분석 카드 상단 광고</div>
+              </div>
+
+              {inlinePromoItems.length > 0 ? (
+                <div className="inlinePromoGrid">
+                  {inlinePromoItems.map((item, idx) => (
+                    <a
+                      key={`${item.link}-${item.id}`}
+                      className={`inlinePromoLink ${idx === 0 ? 'inlinePromoLinkPrimary' : ''}`}
+                      href={item.link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <span className="inlinePromoBadge">{idx === 0 ? 'BEST' : `AD ${idx + 1}`}</span>
+                      <span className="inlinePromoText">{item.title || `쿠팡 추천 링크 ${idx + 1}`}</span>
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <div className="muted inlinePromoEmpty">{inlinePromoMessage || '쿠팡 광고 링크를 준비 중입니다.'}</div>
+              )}
+
+              <p className="inlinePromoDisclosure">
+                이 포스팅은 쿠팡파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
+              </p>
+            </section>
 
             {notes.length > 0 ? (
               <div className="notice">

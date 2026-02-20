@@ -19,6 +19,7 @@ from .config import (
     COUPANG_SUB_ID,
     COUPANG_BANNER_DEFAULT_CATEGORY,
     COUPANG_API_INFO_FILE,
+    COUPANG_LINKS_FILE,
 )
 
 VALID_INTEREST_CATEGORIES = {
@@ -85,6 +86,7 @@ DEFAULT_THEME = EventTheme(
 
 _BANNER_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _CACHED_CREDS: Optional[Tuple[str, str]] = None
+COUPANG_LINK_RE = re.compile(r"https?://link\.coupang\.com/[^\s)\]|]+")
 
 
 def normalize_interest_category(value: Any) -> str:
@@ -318,3 +320,69 @@ def _format_price(value: Optional[float]) -> str:
 def _cta_variant(idx: int) -> str:
     variants = ("최저가 보기", "배송 일정 확인", "리뷰 보고 선택")
     return variants[idx % len(variants)]
+
+
+def _candidate_links_files() -> List[Path]:
+    cwd = Path.cwd()
+    project_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        Path(COUPANG_LINKS_FILE).expanduser(),
+        Path("/opt/wonyodd-reco/쿠팡광고링크.txt"),
+        Path("/home/ubuntu/쿠팡광고링크.txt"),
+        cwd / "쿠팡광고링크.txt",
+        project_root / "쿠팡광고링크.txt",
+    ]
+    unique: List[Path] = []
+    seen = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        unique.append(path)
+        seen.add(key)
+    return unique
+
+
+def _load_coupang_links(limit: int = 16) -> List[str]:
+    max_items = _clamp_int(limit, 1, 24, 12)
+    for path in _candidate_links_files():
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        urls = COUPANG_LINK_RE.findall(text)
+        if not urls:
+            continue
+        deduped: List[str] = []
+        seen = set()
+        for url in urls:
+            cleaned = url.strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            deduped.append(cleaned)
+            if len(deduped) >= max_items:
+                break
+        if deduped:
+            return deduped
+    return []
+
+
+def build_inline_promo_payload(limit: int = 8) -> Dict[str, Any]:
+    links = _load_coupang_links(limit=limit)
+    items = [
+        {
+            "id": idx + 1,
+            "title": "쿠팡 추천 상품 보기" if idx == 0 else f"쿠팡 추천 링크 {idx + 1}",
+            "link": link,
+            "badge": "MAIN" if idx == 0 else "LINK",
+        }
+        for idx, link in enumerate(links)
+    ]
+    return {
+        "ok": True,
+        "title": "쿠팡 추천 프로모션",
+        "subtitle": "실시간 분석 확인 전에 필요한 상품을 빠르게 확인해보세요.",
+        "items": items,
+        "message": "" if items else "쿠팡 광고 링크를 불러오지 못했습니다.",
+    }

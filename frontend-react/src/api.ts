@@ -30,6 +30,21 @@ export type RecommendResponse = {
   candidates?: any[];
 };
 
+export type CoupangInlineItem = {
+  id: number;
+  title: string;
+  link: string;
+  badge?: string;
+};
+
+export type CoupangInlineResponse = {
+  ok: boolean;
+  title: string;
+  subtitle: string;
+  items: CoupangInlineItem[];
+  message?: string;
+};
+
 const API_BASE = (import.meta as any).env?.VITE_API_BASE ?? '';
 
 async function getJson<T>(path: string): Promise<T> {
@@ -78,4 +93,9 @@ export async function fetchCandles(tf: string, limit = 200): Promise<{ ok: boole
     timeframe: res.timeframe,
     candles: res.data || [],
   };
+}
+
+export async function fetchCoupangInlineLinks(limit = 8): Promise<CoupangInlineResponse> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  return getJson(`/api/coupang-inline-links?${q.toString()}`);
 }

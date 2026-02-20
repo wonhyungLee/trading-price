@@ -45,7 +45,12 @@ from .models import WebhookPayload
 from .recommend import recommend, tf_key, resolve_ready_rule
 from .notify import build_discord_message, send_discord_webhook, send_forward_webhooks
 from .alerts import detect_volume_volatility_spike
-from .coupang_banner import build_banner_payload, normalize_interest_category, record_interest_category
+from .coupang_banner import (
+    build_banner_payload,
+    build_inline_promo_payload,
+    normalize_interest_category,
+    record_interest_category,
+)
 
 import json
 
@@ -1248,6 +1253,17 @@ def coupang_banner(keyword: Optional[str] = None, category: Optional[str] = None
         return JSONResponse(payload)
     except Exception:
         return JSONResponse({"message": "배너를 불러오지 못했습니다."}, status_code=500)
+
+@app.get("/api/coupang-inline-links")
+def coupang_inline_links(limit: int = 8):
+    try:
+        payload = build_inline_promo_payload(limit=limit)
+        return JSONResponse(payload)
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "items": [], "message": "광고 링크를 불러오지 못했습니다."},
+            status_code=500,
+        )
 
 @app.post("/api/ad-interest")
 async def ad_interest(req: Request):

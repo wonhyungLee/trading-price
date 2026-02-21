@@ -85,7 +85,7 @@ def _to_trade_price(value: Any) -> str:
 
 def _to_upbit_krw_price(value: Any) -> str:
     try:
-        rounded = Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        rounded = (Decimal(str(value)) / Decimal("1000")).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * Decimal("1000")
         return str(int(rounded))
     except Exception:
         return str(value)

@@ -906,10 +906,6 @@ export default function App() {
                     </span>
                   </div>
                   <div className="metaRow">
-                    <span className="muted">규칙 부연</span>
-                    <span className="ruleDesc">{selectedRuleMeta?.desc ?? '-'}</span>
-                  </div>
-                  <div className="metaRow">
                     <span className="muted">추천 TP</span>
                     <span>
                       <b>{selectedRecommendedTp}</b>{' '}
@@ -920,28 +916,12 @@ export default function App() {
                       ) : null}
                     </span>
                   </div>
-                  <div className="metaRow">
-                    <span className="muted">권장 최대 배율</span>
-                    <span>
-                      <b>{plan?.max_leverage_by_risk ?? '-'}</b>x <span className="muted">(리스크 {plan?.risk_pct ?? '-'}%)</span>
-                    </span>
-                  </div>
-                  <div className="metaRow">
-                    <span className="muted">권장 최대 배율(MDD)</span>
-                    <span>
-                      <b>{plan?.max_leverage_by_mdd ?? '-'}</b>x <span className="muted">전체 MDD 기준</span>
-                    </span>
-                  </div>
                   {isNoStopRule ? (
                     <div className="metaRow">
                       <span className="muted">청산 방식</span>
                       <span>No Stop({selectedRuleMeta?.title})</span>
                     </div>
                   ) : null}
-                  <div className="metaRow">
-                    <span className="muted">청산 룰</span>
-                    <span>{plan?.tp_rule ?? '-'}</span>
-                  </div>
                 </div>
               </>
             ) : null}

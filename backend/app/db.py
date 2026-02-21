@@ -132,6 +132,13 @@ def _migrate_fx_rates_columns(conn: sqlite3.Connection) -> None:
                    SET as_of_date = COALESCE(date, strftime('%Y-%m-%d', 'now'))
                 """
             )
+        elif "rate_date" in existing:
+            conn.execute(
+                """
+                UPDATE fx_rates
+                   SET as_of_date = COALESCE(rate_date, strftime('%Y-%m-%d', 'now'))
+                """
+            )
         else:
             conn.execute(
                 """
@@ -139,10 +146,17 @@ def _migrate_fx_rates_columns(conn: sqlite3.Connection) -> None:
                    SET as_of_date = strftime('%Y-%m-%d', 'now')
                 """
             )
-
-    conn.execute(
-        "UPDATE fx_rates SET as_of_date = strftime('%Y-%m-%d', 'now') WHERE as_of_date IS NULL OR TRIM(as_of_date) = ''"
-    )
+    if "rate_date" in existing:
+        conn.execute(
+            """
+            UPDATE fx_rates
+               SET as_of_date = COALESCE(NULLIF(TRIM(as_of_date), ''), rate_date, strftime('%Y-%m-%d', 'now'))
+            """
+        )
+    else:
+        conn.execute(
+            "UPDATE fx_rates SET as_of_date = strftime('%Y-%m-%d', 'now') WHERE as_of_date IS NULL OR TRIM(as_of_date) = ''"
+        )
 
 
 def _migrate_pending_auto_trade_webhooks(conn: sqlite3.Connection) -> None:
@@ -374,27 +388,64 @@ def insert_fx_rate(
     conn = connect()
     try:
         now = int(time.time()) if fetched_ts is None else int(fetched_ts)
-        params = (str(base).upper(), str(quote).upper(), float(rate), str(as_of_date), now, source)
-        insert_sql = """
-            INSERT INTO fx_rates (base, quote, rate, as_of_date, fetched_ts, source)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(base, quote, as_of_date)
-            DO UPDATE SET
-              rate = excluded.rate,
-              fetched_ts = excluded.fetched_ts,
-              source = excluded.source
-            """
+        base_u = str(base).upper()
+        quote_u = str(quote).upper()
+        as_of = str(as_of_date)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(fx_rates)").fetchall()}
+        has_rate_date = "rate_date" in cols
+        has_as_of_date = "as_of_date" in cols
+
+        if has_rate_date and has_as_of_date:
+            params = (base_u, quote_u, float(rate), as_of, as_of, now, source)
+            insert_sql = """
+                INSERT INTO fx_rates (base, quote, rate, rate_date, as_of_date, fetched_ts, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(base, quote, rate_date)
+                DO UPDATE SET
+                  rate = excluded.rate,
+                  as_of_date = excluded.as_of_date,
+                  fetched_ts = excluded.fetched_ts,
+                  source = excluded.source
+                """
+            replace_sql = """
+                INSERT OR REPLACE INTO fx_rates (base, quote, rate, rate_date, as_of_date, fetched_ts, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """
+        elif has_rate_date:
+            params = (base_u, quote_u, float(rate), as_of, now, source)
+            insert_sql = """
+                INSERT INTO fx_rates (base, quote, rate, rate_date, fetched_ts, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(base, quote, rate_date)
+                DO UPDATE SET
+                  rate = excluded.rate,
+                  fetched_ts = excluded.fetched_ts,
+                  source = excluded.source
+                """
+            replace_sql = """
+                INSERT OR REPLACE INTO fx_rates (base, quote, rate, rate_date, fetched_ts, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """
+        else:
+            params = (base_u, quote_u, float(rate), as_of, now, source)
+            insert_sql = """
+                INSERT INTO fx_rates (base, quote, rate, as_of_date, fetched_ts, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(base, quote, as_of_date)
+                DO UPDATE SET
+                  rate = excluded.rate,
+                  fetched_ts = excluded.fetched_ts,
+                  source = excluded.source
+                """
+            replace_sql = """
+                INSERT OR REPLACE INTO fx_rates (base, quote, rate, as_of_date, fetched_ts, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """
         try:
             conn.execute(insert_sql, params)
         except sqlite3.OperationalError as e:
             if "ON CONFLICT clause does not match" in str(e):
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO fx_rates (base, quote, rate, as_of_date, fetched_ts, source)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    params,
-                )
+                conn.execute(replace_sql, params)
             else:
                 raise
         conn.commit()

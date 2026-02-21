@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import urllib.error
 import urllib.request
+from decimal import Decimal, ROUND_HALF_UP
 from urllib.parse import urlencode
 from typing import Any, Dict, Optional
 
@@ -79,6 +80,13 @@ db.init_db()
 def _to_trade_price(value: Any) -> str:
     try:
         return f"{float(value):.2f}"
+    except Exception:
+        return str(value)
+
+def _to_upbit_krw_price(value: Any) -> str:
+    try:
+        rounded = Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return str(int(rounded))
     except Exception:
         return str(value)
 
@@ -541,7 +549,8 @@ def _build_pending_payload_from_row(row: sqlite3.Row, fx_rate: Optional[float]) 
                 return _order_payload_fields(payload), None
             return None, "missing_upbit_price_usd"
         try:
-            payload["price"] = _to_trade_price(float(price_usd) * float(fx_rate))
+            price_krw = Decimal(str(price_usd)) * Decimal(str(fx_rate))
+            payload["price"] = _to_upbit_krw_price(price_krw)
         except Exception:
             return None, "invalid_upbit_price_usd"
         payload.pop("price_usd", None)

@@ -1,25 +1,60 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   fetchCandles,
-  fetchCoupangInlineLinks,
   fetchLatest,
   fetchRecommend,
   notifyRecommend,
   type Candle,
-  type CoupangInlineItem,
   type Scenario,
 } from './api';
 import PriceChart from './components/PriceChart';
 import GlossaryModal from './components/GlossaryModal';
 
 type Side = 'long' | 'short';
+type CoupangPromoItem = {
+  id: string;
+  link: string;
+  image: string;
+  title: string;
+};
 
-const INLINE_PROMO_LIMIT = 8;
+const BANNER_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const BANNER_COOLDOWN_KEY = 'cpb_cooldown_until';
+
+const COUPANG_PROMO_ITEMS: CoupangPromoItem[] = [
+  { id: 'dPJvzF', link: 'https://link.coupang.com/a/dPJvzF', image: '/coupang-ads-2026/dPJvzF_600.gif', title: '쿠팡 추천 링크 1' },
+  { id: 'dPJzZu', link: 'https://link.coupang.com/a/dPJzZu', image: '/coupang-ads-2026/dPJzZu_600.gif', title: '쿠팡 추천 링크 2' },
+  { id: 'dPJC4g', link: 'https://link.coupang.com/a/dPJC4g', image: '/coupang-ads-2026/dPJC4g_600.gif', title: '쿠팡 추천 링크 3' },
+  { id: 'dPJQFz', link: 'https://link.coupang.com/a/dPJQFz', image: '/coupang-ads-2026/dPJQFz_600.gif', title: '쿠팡 추천 링크 4' },
+  { id: 'dPJVxr', link: 'https://link.coupang.com/a/dPJVxr', image: '/coupang-ads-2026/dPJVxr_600.gif', title: '쿠팡 추천 링크 5' },
+  { id: 'dPJ2jt', link: 'https://link.coupang.com/a/dPJ2jt', image: '/coupang-ads-2026/dPJ2jt_600.gif', title: '쿠팡 추천 링크 6' },
+  { id: 'dPKcZs', link: 'https://link.coupang.com/a/dPKcZs', image: '/coupang-ads-2026/dPKcZs_600.gif', title: '쿠팡 추천 링크 7' },
+  { id: 'dPKgU0', link: 'https://link.coupang.com/a/dPKgU0', image: '/coupang-ads-2026/dPKgU0_600.gif', title: '쿠팡 추천 링크 8' },
+  { id: 'dPKjlp', link: 'https://link.coupang.com/a/dPKjlp', image: '/coupang-ads-2026/dPKjlp_600.gif', title: '쿠팡 추천 링크 9' },
+  { id: 'dPKIZ9', link: 'https://link.coupang.com/a/dPKIZ9', image: '/coupang-ads-2026/dPKIZ9_600.gif', title: '쿠팡 추천 링크 10' },
+  { id: 'dPKoN6', link: 'https://link.coupang.com/a/dPKoN6', image: '/coupang-ads-2026/dPKoN6_600.gif', title: '쿠팡 추천 링크 11' },
+  { id: 'dPKr4O', link: 'https://link.coupang.com/a/dPKr4O', image: '/coupang-ads-2026/dPKr4O_600.gif', title: '쿠팡 추천 링크 12' },
+  { id: 'dPKvE3', link: 'https://link.coupang.com/a/dPKvE3', image: '/coupang-ads-2026/dPKvE3_600.gif', title: '쿠팡 추천 링크 13' },
+  { id: 'dPKzjf', link: 'https://link.coupang.com/a/dPKzjf', image: '/coupang-ads-2026/dPKzjf_600.gif', title: '쿠팡 추천 링크 14' },
+  { id: 'dPKFV8', link: 'https://link.coupang.com/a/dPKFV8', image: '/coupang-ads-2026/dPKFV8_600.gif', title: '쿠팡 추천 링크 15' },
+  { id: 'dPKI7T', link: 'https://link.coupang.com/a/dPKI7T', image: '/coupang-ads-2026/dPKI7T_600.gif', title: '쿠팡 추천 링크 16' },
+];
+
 const TF_SECONDS: Record<string, number> = {
   '30m': 30 * 60,
   '60m': 60 * 60,
   '180m': 180 * 60,
 };
+
+function readBannerCooldown(): number {
+  try {
+    const raw = localStorage.getItem(BANNER_COOLDOWN_KEY);
+    const parsed = raw ? Number(raw) : 0;
+    return Number.isFinite(parsed) ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
 
 function normalizeCandles(candles: Candle[], timeframe: string): Candle[] {
   const tfSec = TF_SECONDS[timeframe];
@@ -215,8 +250,11 @@ export default function App() {
   const [glossaryOpen, setGlossaryOpen] = useState(false);
   const [glossaryQuery, setGlossaryQuery] = useState<string>('');
 
-  const [inlinePromoItems, setInlinePromoItems] = useState<CoupangInlineItem[]>([]);
-  const [inlinePromoMessage, setInlinePromoMessage] = useState<string>('');
+  const [bannerOpen, setBannerOpen] = useState(false);
+  const [bannerCooldownUntil, setBannerCooldownUntil] = useState<number>(() => readBannerCooldown());
+  const [promoSeed, setPromoSeed] = useState<number>(() =>
+    Math.floor(Math.random() * Math.max(1, COUPANG_PROMO_ITEMS.length)),
+  );
 
   const [fontBasePx, setFontBasePx] = useState<number>(() => {
     try {
@@ -247,6 +285,19 @@ export default function App() {
   const selectedRuleMdd = selected?.ready_rule_mdd_pct ?? plan?.ready_rule_mdd_pct;
   const selectedRecommendedTp = selectedRuleMeta?.recommendedTp ?? '-';
   const isNoStopRule = Boolean(selectedRuleMeta?.noStop && selected?.status === 'ready');
+  const popupPromoItems = useMemo(() => {
+    if (COUPANG_PROMO_ITEMS.length === 0) return [];
+    const size = Math.min(6, COUPANG_PROMO_ITEMS.length);
+    return Array.from({ length: size }, (_, idx) => {
+      const offset = (promoSeed + idx) % COUPANG_PROMO_ITEMS.length;
+      return COUPANG_PROMO_ITEMS[offset];
+    });
+  }, [promoSeed]);
+  const bannerOpenRef = useRef(bannerOpen);
+
+  useEffect(() => {
+    bannerOpenRef.current = bannerOpen;
+  }, [bannerOpen]);
 
   function renderTpValue(value: any, isRecommended: boolean) {
     const text = fmt(value);
@@ -266,6 +317,45 @@ export default function App() {
     setGlossaryQuery(term ?? '');
     setGlossaryOpen(true);
   }
+
+  function startBannerCooldown() {
+    const until = Date.now() + BANNER_COOLDOWN_MS;
+    setBannerCooldownUntil(until);
+    try {
+      localStorage.setItem(BANNER_COOLDOWN_KEY, String(until));
+    } catch {
+      // ignore
+    }
+    setBannerOpen(false);
+  }
+
+  function openBannerIfAllowed() {
+    if (Date.now() < bannerCooldownUntil) return;
+    if (COUPANG_PROMO_ITEMS.length > 0) setPromoSeed((prev) => (prev + 3) % COUPANG_PROMO_ITEMS.length);
+    setBannerOpen(true);
+  }
+
+  useEffect(() => {
+    if (bannerOpen) return;
+
+    const handler = (event: MouseEvent) => {
+      if (bannerOpenRef.current) return;
+      if (Date.now() < bannerCooldownUntil) return;
+
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('.cpbOverlay')) return;
+
+      const clickable = target.closest('button, [role="button"], a');
+      if (!clickable) return;
+      if ((clickable as HTMLElement).closest('[data-cp-ignore]')) return;
+
+      window.setTimeout(() => openBannerIfAllowed(), 0);
+    };
+
+    document.addEventListener('click', handler, true);
+    return () => document.removeEventListener('click', handler, true);
+  }, [bannerOpen, bannerCooldownUntil]);
 
   function Term({ label, term }: { label: string; term: string }) {
     return (
@@ -373,27 +463,13 @@ export default function App() {
   }, [fontBasePx]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const loadInlinePromo = async () => {
-      try {
-        const payload = await fetchCoupangInlineLinks(INLINE_PROMO_LIMIT);
-        if (cancelled) return;
-        const items = Array.isArray(payload?.items) ? payload.items : [];
-        setInlinePromoItems(items);
-        setInlinePromoMessage(items.length ? '' : (payload?.message || '쿠팡 광고 링크를 불러오지 못했습니다.'));
-      } catch {
-        if (cancelled) return;
-        setInlinePromoItems([]);
-        setInlinePromoMessage('쿠팡 광고 링크를 불러오지 못했습니다.');
-      }
-    };
-
-    loadInlinePromo();
+    if (!bannerOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
     return () => {
-      cancelled = true;
+      document.body.style.overflow = prev;
     };
-  }, []);
+  }, [bannerOpen]);
 
   // Initial load
   useEffect(() => {
@@ -492,6 +568,48 @@ export default function App() {
 
   return (
     <>
+      {bannerOpen ? (
+        <div className="cpbOverlay" role="dialog" aria-modal="true" aria-label="쿠팡 프로모션 (광고)">
+          <div className="cpbModal" onClick={(e) => e.stopPropagation()}>
+            <button
+              className="cpbClose"
+              onClick={(e) => {
+                e.stopPropagation();
+                startBannerCooldown();
+              }}
+              aria-label="닫기"
+            >
+              ×
+            </button>
+            <div className="cpbHeader">
+              <div className="cpbTitle">쿠팡 프로모션</div>
+              <p className="cpbSubtitle">쿠팡광고2026 gif + 링크 기반 추천 상품입니다.</p>
+            </div>
+            <div className="cpbGrid">
+              {popupPromoItems.map((item, idx) => (
+                <a
+                  key={`${item.id}-${item.link}`}
+                  className={`cpbCard ${idx === 0 ? 'cpbCardPrimary' : ''}`}
+                  href={item.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => startBannerCooldown()}
+                >
+                  <img className="cpbThumb" src={item.image} alt={item.title} loading="lazy" />
+                  <div className="cpbCopy">
+                    <span className="cpbBadge">{idx === 0 ? 'BEST' : `AD ${idx + 1}`}</span>
+                    <div className="cpbCardTitle">{item.title}</div>
+                    <span className="cpbCta">바로 보기</span>
+                  </div>
+                </a>
+              ))}
+            </div>
+            <p className="cpbDisclosure">
+              이 포스팅은 쿠팡파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
+            </p>
+          </div>
+        </div>
+      ) : null}
       <header className="topBar">
         <div className="wrap topBarInner">
           <div className="brand">
@@ -507,6 +625,7 @@ export default function App() {
                 className={`segBtn ${side === 'long' ? 'segBtnActiveLong' : ''}`}
                 onClick={() => {
                   setSide('long');
+                  openBannerIfAllowed();
                   runRecommend('long');
                 }}
                 disabled={busy}
@@ -517,6 +636,7 @@ export default function App() {
                 className={`segBtn ${side === 'short' ? 'segBtnActiveShort' : ''}`}
                 onClick={() => {
                   setSide('short');
+                  openBannerIfAllowed();
                   runRecommend('short');
                 }}
                 disabled={busy}
@@ -577,6 +697,7 @@ export default function App() {
             <button className="btn controlGlossary" onClick={() => openGlossary()}>
               용어사전
             </button>
+
           </div>
         </div>
       </header>
@@ -717,36 +838,6 @@ export default function App() {
                 </div>
               </div>
             </div>
-
-            <section className="inlinePromoBox" aria-label="쿠팡 프로모션">
-              <div className="inlinePromoHead">
-                <div className="inlinePromoTitle">쿠팡 프로모션</div>
-                <div className="inlinePromoSub">메인 결과/분석 카드 상단 광고</div>
-              </div>
-
-              {inlinePromoItems.length > 0 ? (
-                <div className="inlinePromoGrid">
-                  {inlinePromoItems.map((item, idx) => (
-                    <a
-                      key={`${item.link}-${item.id}`}
-                      className={`inlinePromoLink ${idx === 0 ? 'inlinePromoLinkPrimary' : ''}`}
-                      href={item.link}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      <span className="inlinePromoBadge">{idx === 0 ? 'BEST' : `AD ${idx + 1}`}</span>
-                      <span className="inlinePromoText">{item.title || `쿠팡 추천 링크 ${idx + 1}`}</span>
-                    </a>
-                  ))}
-                </div>
-              ) : (
-                <div className="muted inlinePromoEmpty">{inlinePromoMessage || '쿠팡 광고 링크를 준비 중입니다.'}</div>
-              )}
-
-              <p className="inlinePromoDisclosure">
-                이 포스팅은 쿠팡파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받을 수 있습니다.
-              </p>
-            </section>
 
             {notes.length > 0 ? (
               <div className="notice">

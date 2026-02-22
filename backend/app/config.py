@@ -86,11 +86,12 @@ READY_NOTIFY_COOLDOWN_SEC = int(env_float("WONYODD_READY_NOTIFY_COOLDOWN_SEC", 0
 # READY signal auto-trade relay
 AUTO_TRADE_WEBHOOK_URL = env_str("WONYODD_AUTO_TRADE_WEBHOOK_URL", "http://134.185.119.11/order")
 
-# FX conversion for auto-trade webhook price conversion
+# Price conversion rate for auto-trade webhook price conversion
+# Defaults use Upbit KRW-USDT ticker.
 WONYODD_FX_RATE_AUTO_FETCH_ENABLED = env_bool("WONYODD_FX_RATE_AUTO_FETCH_ENABLED", True)
-WONYODD_FX_RATE_BASE = env_str("WONYODD_FX_RATE_BASE", "USD")
+WONYODD_FX_RATE_BASE = env_str("WONYODD_FX_RATE_BASE", "USDT")
 WONYODD_FX_RATE_QUOTE = env_str("WONYODD_FX_RATE_QUOTE", "KRW")
-WONYODD_FX_RATE_FETCH_HOST = env_str("WONYODD_FX_RATE_FETCH_HOST", "https://api.frankfurter.dev")
+WONYODD_FX_RATE_FETCH_HOST = env_str("WONYODD_FX_RATE_FETCH_HOST", "https://api.upbit.com")
 WONYODD_FX_RATE_FETCH_INTERVAL_SEC = int(env_float("WONYODD_FX_RATE_FETCH_INTERVAL_SEC", 3 * 60 * 60))
 WONYODD_FX_RATE_FETCH_TIMEOUT_SEC = int(env_float("WONYODD_FX_RATE_FETCH_TIMEOUT_SEC", 10))
 

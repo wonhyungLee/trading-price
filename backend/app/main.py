@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import urllib.error
 import urllib.request
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from urllib.parse import urlencode
 from typing import Any, Dict, Optional
 
@@ -90,6 +90,22 @@ def _to_upbit_krw_price(value: Any) -> str:
     except Exception:
         return str(value)
 
+
+def _to_upbit_amount_8(value: Any) -> str:
+    """
+    Format Upbit amount with up to 8 decimal places.
+    Keep non-numeric sentinels (e.g. NaN) unchanged.
+    """
+    text = str(value).strip()
+    try:
+        dec = Decimal(text)
+    except Exception:
+        return str(value)
+    if not dec.is_finite():
+        return str(value)
+    quantized = dec.quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+    return f"{quantized:.8f}"
+
 def _order_payload_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
@@ -105,8 +121,8 @@ def _order_payload_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         ordered[key] = value
     return ordered
 
-def _get_usdkrw_fx_rate() -> Optional[float]:
-    row = db.fetch_latest_fx_rate(WONYODD_FX_RATE_BASE, WONYODD_FX_RATE_QUOTE)
+def _get_cached_fx_rate(base: str, quote: str) -> Optional[float]:
+    row = db.fetch_latest_fx_rate(base, quote)
     if row is None:
         return None
     try:
@@ -195,12 +211,14 @@ def _rebuild_tf_from_1m(tf: str, limit: int) -> list[dict]:
         return []
     return rebuilt[-limit:]
 
-def _fetch_fx_rate_from_frankfurter(base: str, quote: str) -> tuple[float, str, str]:
+def _fetch_fx_rate_from_upbit(base: str, quote: str) -> tuple[float, str, str]:
     base_u = str(base).upper()
     quote_u = str(quote).upper()
-    params = urlencode({"base": base_u, "symbols": quote_u})
+    # Upbit market format: QUOTE-BASE (e.g. KRW-USDT)
+    market = f"{quote_u}-{base_u}"
+    params = urlencode({"markets": market})
     host = WONYODD_FX_RATE_FETCH_HOST.rstrip("/")
-    url = f"{host}/v1/latest?{params}"
+    url = f"{host}/v1/ticker?{params}"
     req = urllib.request.Request(
         url=url,
         headers={"User-Agent": "Mozilla/5.0 WonyoddRecoFX"},
@@ -210,26 +228,36 @@ def _fetch_fx_rate_from_frankfurter(base: str, quote: str) -> tuple[float, str, 
         if resp.status != 200:
             body = resp.read(300).decode("utf-8", errors="replace")
             body = body.replace("\\n", " ")
-            raise RuntimeError(f"frankfurter_status_{resp.status}:{body}")
+            raise RuntimeError(f"upbit_status_{resp.status}:{body}")
         payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-    rate = float(payload["rates"][quote_u])
-    as_of_date = str(payload.get("date"))
-    if not as_of_date:
+    if not isinstance(payload, list) or not payload:
+        raise RuntimeError("upbit_invalid_payload")
+    item = payload[0] if isinstance(payload[0], dict) else None
+    if item is None:
+        raise RuntimeError("upbit_invalid_item")
+    rate = float(item["trade_price"])
+    ts_ms = item.get("timestamp") or item.get("trade_timestamp")
+    if ts_ms is not None:
+        try:
+            as_of_date = time.strftime("%Y-%m-%d", time.gmtime(int(ts_ms) / 1000.0))
+        except Exception:
+            as_of_date = time.strftime("%Y-%m-%d", time.gmtime())
+    else:
         as_of_date = time.strftime("%Y-%m-%d", time.gmtime())
     return rate, as_of_date, url
 
 def _refresh_fx_rate(base: str, quote: str) -> Optional[float]:
     try:
-        rate, as_of_date, source = _fetch_fx_rate_from_frankfurter(base, quote)
+        rate, as_of_date, source = _fetch_fx_rate_from_upbit(base, quote)
         db.insert_fx_rate(base, quote, rate, as_of_date, source=source)
-        print(f"[INFO] FX rate updated {base.upper()}->{quote.upper()} date={as_of_date} rate={rate}")
+        print(f"[INFO] FX rate updated via Upbit {quote.upper()}-{base.upper()} date={as_of_date} rate={rate}")
         return rate
     except Exception as e:
         print(f"[WARN] FX rate refresh failed: {type(e).__name__}: {e}")
         return None
 
-def _resolve_usdkrw_fx_rate() -> Optional[float]:
-    rate = _get_usdkrw_fx_rate()
+def _resolve_fx_rate() -> Optional[float]:
+    rate = _get_cached_fx_rate(WONYODD_FX_RATE_BASE, WONYODD_FX_RATE_QUOTE)
     if rate is not None:
         return rate
     if not WONYODD_FX_RATE_AUTO_FETCH_ENABLED:
@@ -351,15 +379,16 @@ def _build_upbit_auto_trade_order_tasks(
             "order_side": "buy",
             "trigger_type": "entry",
             "trigger_price": entry_price,
-            "requires_fx": False,
+            "requires_fx": True,
             "payload": {
                 "password": "dldnjsgud",
                 "exchange": "UPBIT",
                 "base": "BTC",
                 "quote": "KRW",
                 "side": "buy",
-                "type": "market",
+                "type": "limit",
                 "amount": "NaN",
+                "price_usd": _to_trade_price(entry_price),
                 "percent": "95",
                 "order_name": "업비트 풀매수",
             },
@@ -370,15 +399,16 @@ def _build_upbit_auto_trade_order_tasks(
             "order_side": "sell",
             "trigger_type": "tp",
             "trigger_price": tp_price,
-            "requires_fx": False,
+            "requires_fx": True,
             "payload": {
                 "password": "dldnjsgud",
                 "exchange": "UPBIT",
                 "base": "BTC",
                 "quote": "KRW",
                 "side": "sell",
-                "type": "market",
+                "type": "limit",
                 "amount": "NaN",
+                "price_usd": _to_trade_price(tp_price),
                 "percent": "100",
                 "order_name": "업비트 풀매도",
             },
@@ -552,6 +582,8 @@ def _build_pending_payload_from_row(row: sqlite3.Row, fx_rate: Optional[float]) 
         except Exception:
             return None, "invalid_upbit_price_usd"
         payload.pop("price_usd", None)
+    if str(row["exchange"] or "").upper() == "UPBIT" and "amount" in payload:
+        payload["amount"] = _to_upbit_amount_8(payload.get("amount"))
     if str(row["exchange"] or "").upper() == "OKX":
         payload.pop("percent", None)
     return _order_payload_fields(payload), None
@@ -559,7 +591,7 @@ def _build_pending_payload_from_row(row: sqlite3.Row, fx_rate: Optional[float]) 
 
 def _flush_pending_auto_trade_webhooks(fx_rate: Optional[float] = None) -> int:
     if fx_rate is None:
-        fx_rate = _resolve_usdkrw_fx_rate()
+        fx_rate = _resolve_fx_rate()
 
     expired = db.prune_pending_auto_trades(older_than_seconds=AUTO_TRADE_PENDING_TTL_SEC)
     if expired:

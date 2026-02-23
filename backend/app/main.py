@@ -78,7 +78,7 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 READY_RULE_NOTIFY_SET = {"A", "B", "C", "D", S_RULE_NAME}
-READY_RULE_AUTO_TRADE_SET = {"A", "B", "C", S_RULE_NAME}
+READY_RULE_AUTO_TRADE_SET = {S_RULE_NAME}
 TIMEFRAME_SECONDS = {"30m": 1800, "60m": 3600, "180m": 10800}
 
 app = FastAPI(title="Wonyodd Reco Engine", version="1.0.0")
@@ -409,7 +409,7 @@ def _s_rule_global_cooldown_ok(now_ts: int) -> tuple[bool, Optional[int]]:
         return True, None
     latest_created: Optional[int] = None
     for side in ("long", "short"):
-        row = db.fetch_latest_notification(f"ready:{S_RULE_ENTRY_TF}:{side}")
+        row = db.fetch_latest_notification(f"ready:{S_RULE_ENTRY_TF}:{side}", ready_rule=S_RULE_NAME)
         if not row:
             continue
         try:
@@ -984,8 +984,7 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
         applied_s, s_reason = _apply_s_rule_to_recommendation(rec, trigger_tf=tf)
         if not applied_s:
             if s_reason not in ("trigger_tf_not_entry", "selected_tf_not_entry"):
-                print(f"[DEBUG] Ready notify skipped (S rule gating): reason={s_reason} tf={tf} side={side}")
-            continue
+                print(f"[DEBUG] Ready notify S fallback: reason={s_reason} tf={tf} side={side}")
 
         selected = rec.get("selected") or {}
         plan = rec.get("plan") or {}
@@ -1000,16 +999,19 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
         if db.notification_exists(kind, tf, ts):
             continue
 
-        if s_sent_this_tick:
+        is_s_rule = rule_norm == S_RULE_NAME
+
+        if is_s_rule and s_sent_this_tick:
             print("[DEBUG] Ready notify skipped (S rule one-entry-per-tick)")
             continue
 
-        s_cooldown_ok, s_last_created = _s_rule_global_cooldown_ok(now)
-        if not s_cooldown_ok:
-            print(
-                f"[DEBUG] Ready notify skipped (S cooldown): last_created={s_last_created} cooldown={S_RULE_COOLDOWN_SEC}s"
-            )
-            continue
+        if is_s_rule:
+            s_cooldown_ok, s_last_created = _s_rule_global_cooldown_ok(now)
+            if not s_cooldown_ok:
+                print(
+                    f"[DEBUG] Ready notify skipped (S cooldown): last_created={s_last_created} cooldown={S_RULE_COOLDOWN_SEC}s"
+                )
+                continue
 
         last = db.fetch_latest_notification(kind)
         if last:
@@ -1079,7 +1081,8 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
                 ready_rule_mdd_pct=rule_mdd,
                 status=selected.get("status", plan.get("status")),
             )
-            s_sent_this_tick = True
+            if is_s_rule:
+                s_sent_this_tick = True
 
 def _parse_ts(payload: WebhookPayload) -> int:
     # 1. ts field

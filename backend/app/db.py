@@ -277,13 +277,19 @@ def notification_exists(kind: str, timeframe: str, ts: int) -> bool:
     finally:
         conn.close()
 
-def fetch_latest_notification(kind: str) -> Optional[sqlite3.Row]:
+def fetch_latest_notification(kind: str, ready_rule: Optional[str] = None) -> Optional[sqlite3.Row]:
     conn = connect()
     try:
-        cur = conn.execute(
-            """SELECT * FROM notifications WHERE kind=? ORDER BY created_ts DESC LIMIT 1""",
-            (kind,),
-        )
+        if ready_rule is None:
+            cur = conn.execute(
+                """SELECT * FROM notifications WHERE kind=? ORDER BY created_ts DESC LIMIT 1""",
+                (kind,),
+            )
+        else:
+            cur = conn.execute(
+                """SELECT * FROM notifications WHERE kind=? AND ready_rule=? ORDER BY created_ts DESC LIMIT 1""",
+                (kind, str(ready_rule)),
+            )
         return cur.fetchone()
     finally:
         conn.close()

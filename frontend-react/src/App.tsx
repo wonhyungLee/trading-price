@@ -186,6 +186,12 @@ const READY_RULE_INFO: Record<
     recommendedTp: 'TP1',
     noStop: false,
   },
+  S: {
+    title: '규칙 S',
+    desc: '30m/60m 합의 전용 혼합 규칙입니다. 롱은 C 규칙, 숏은 B/C 규칙 합의일 때만 진입합니다.',
+    recommendedTp: 'TP1',
+    noStop: true,
+  },
 };
 
 function fmt(x: any): string {
@@ -283,7 +289,16 @@ export default function App() {
   const selectedRule = String(selected?.ready_rule || plan?.ready_rule || '-').toUpperCase();
   const selectedRuleMeta = READY_RULE_INFO[selectedRule];
   const selectedRuleMdd = selected?.ready_rule_mdd_pct ?? plan?.ready_rule_mdd_pct;
-  const selectedRecommendedTp = selectedRuleMeta?.recommendedTp ?? '-';
+  const selectedRecommendedTp = String(plan?.recommended_tp_key || selectedRuleMeta?.recommendedTp || '-').toUpperCase();
+  const planRecommendedPrice = Number(plan?.recommended_price);
+  const recommendedTpPrice =
+    Number.isFinite(planRecommendedPrice)
+      ? planRecommendedPrice
+      : selectedRecommendedTp === 'TP2'
+        ? plan?.tp2_price
+        : selectedRecommendedTp === 'TP1'
+          ? plan?.tp1_price
+          : null;
   const isNoStopRule = Boolean(selectedRuleMeta?.noStop && selected?.status === 'ready');
   const popupPromoItems = useMemo(() => {
     if (COUPANG_PROMO_ITEMS.length === 0) return [];
@@ -615,7 +630,7 @@ export default function App() {
           <div className="brand">
             <div className="brandTitle">Wonyodd Reco</div>
             <div className="muted brandSub">
-              1D 레짐 + 30m/60m/180m 후보 중 “지금 진입이 쉬운 TF”를 고르고 Entry/Stop/TP를 제안합니다.
+              1D 레짐 + 30m/60m/180m 후보 중 “지금 진입이 쉬운 TF”를 고르고 진입가/손절가/목표가를 제안합니다.
             </div>
           </div>
 
@@ -789,7 +804,7 @@ export default function App() {
 
             <div className="muted panelFoot">
               {hasPlan
-                ? '추천 후: Entry/Stop/TP 라인이 표시됩니다. (SMA5/SMA200은 항상 표시)'
+                ? '추천 후: 진입가/손절가/목표가 라인이 표시됩니다. (SMA5/SMA200은 항상 표시)'
                 : '추천 전: 현재 가격과 SMA 라인만 표시됩니다. LONG/SHORT를 눌러 추천을 생성하세요.'}
             </div>
 
@@ -833,7 +848,7 @@ export default function App() {
                       방향 <b>{plan?.side?.toUpperCase?.()}</b> · TF <b>{plan?.tf}</b>
                     </>
                   ) : (
-                    <>LONG/SHORT 버튼을 누르면 Entry/Stop/TP가 표시됩니다.</>
+                    <>LONG/SHORT 버튼을 누르면 진입가/손절가/목표가가 표시됩니다.</>
                   )}
                 </div>
               </div>
@@ -852,44 +867,35 @@ export default function App() {
                 <div className="priceGrid">
                   <div className="priceCard">
                     <div className="muted">
-                      <Term label="Entry" term="ATR(14)" /> <span className="muted">({plan?.entry_type})</span>
+                      <Term label="진입가" term="ATR(14)" />
                     </div>
                     <div className="priceValue">{fmt(plan?.entry_price)}</div>
-                    <div className="muted">
-                      k={plan?.params?.entry_atr_k ?? '-'} · 거리 {plan?.entry_distance_pct ?? '-'}%
-                    </div>
                   </div>
 
                   <div className="priceCard">
                     <div className="muted">
-                      <Term label="Stop" term="ATR(14)" />
+                      <Term label="손절가" term="ATR(14)" />
                     </div>
                     <div className="priceValue">{fmt(plan?.stop_price)}</div>
-                    <div className="muted">
-                      ATR x {plan?.params?.stop_atr_mult ?? '-'} · {plan?.stop_distance_pct ?? '-'}%
-                    </div>
                   </div>
 
                   <div className="priceCard">
                     <div className="muted">
-                      <Term label="TP1" term="SMA5" />
+                      <Term label="목표가" term="추천 TP" />
                     </div>
-                    <div className="priceValue">{fmt(plan?.tp1_price)}</div>
-                    <div className="muted">
-                      <Term label="R:R" term="R:R" /> {plan?.reward_risk_to_tp1 ?? '-'}
-                    </div>
+                    <div className="priceValue">{fmt(recommendedTpPrice)}</div>
                   </div>
                 </div>
 
                 <div className="planMeta">
                   <div className="metaRow">
-                    <span className="muted">TP2/TP3</span>
+                    <span className="muted">추천가2/추천가3</span>
                     <span>
                       <b>{renderTpValue(plan?.tp2_price, selectedRecommendedTp === 'TP2' && selected?.status === 'ready')}</b> / <b>{fmt(plan?.tp3_price)}</b>
                     </span>
                   </div>
                   <div className="metaRow">
-                    <span className="muted">TP1</span>
+                    <span className="muted">추천가1</span>
                     <span>
                       <b>{renderTpValue(plan?.tp1_price, selectedRecommendedTp === 'TP1' && selected?.status === 'ready')}</b>
                     </span>
@@ -908,10 +914,10 @@ export default function App() {
                   <div className="metaRow">
                     <span className="muted">추천 TP</span>
                     <span>
-                      <b>{selectedRecommendedTp}</b>{' '}
+                      <b>{selectedRecommendedTp === 'TP2' ? '추천가2' : selectedRecommendedTp === 'TP1' ? '추천가1' : '-'}</b>{' '}
                       {selected?.status === 'ready' ? (
                         <span className="muted">
-                          ({selectedRecommendedTp === 'TP2' ? fmt(plan?.tp2_price) : fmt(plan?.tp1_price)})
+                          ({fmt(recommendedTpPrice)})
                         </span>
                       ) : null}
                     </span>

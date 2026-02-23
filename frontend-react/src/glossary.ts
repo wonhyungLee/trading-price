@@ -87,7 +87,7 @@ export const GLOSSARY: GlossaryEntry[] = [
     term: 'Ready Rule',
     short: 'READY 신호 발생 시 적용되는 규칙',
     detail:
-      'A/B/C/D 규칙은 SMA5 편차와 ATR% 조건으로 분기됩니다. A/B/C는 No Stop 운영, 규칙별 추천 TP( A/B: TP2, C/D: TP1 )를 함께 사용해 손익/리스크 선호도에 맞게 실행합니다.',
+      'A/B/C/D 규칙은 SMA5 편차와 ATR% 조건으로 분기됩니다. 추가로 S 규칙은 30m/60m 합의 전용 혼합 규칙(롱 C, 숏 BC)입니다. A/B/C/S는 No Stop 운영, 규칙별 추천 TP를 함께 사용해 손익/리스크 선호도에 맞게 실행합니다.',
     tags: ['규칙', 'ABCD', 'MDD', 'TP'],
   },
   {

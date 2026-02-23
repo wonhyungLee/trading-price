@@ -13,14 +13,15 @@ from .config import DISCORD_WEBHOOK_URL, DISCORD_WEBHOOK_FILE
 from .config import FORWARD_WEBHOOK_TIMEOUT_SEC, FORWARD_WEBHOOK_URLS
 from .recommend import resolve_ready_rule
 
-TRADING_SITE_URL = "http://trading.p-e.kr"
+TRADING_SITE_URL = "https://aicoincenter.store"
 READY_TP_RECOMMENDATION = {
     "A": "TP2",
     "B": "TP2",
     "C": "TP1",
     "D": "TP1",
+    "S": "TP1",
 }
-NO_STOP_RULES = {"A", "B", "C"}
+NO_STOP_RULES = {"A", "B", "C", "S"}
 
 
 def _recommended_tp_by_rule(rule: str) -> str:
@@ -115,6 +116,11 @@ def _append_site_link(content: Optional[str]) -> str:
 def _normalized_ready_rule(selected: Dict[str, Any], plan: Dict[str, Any]) -> tuple[str, Optional[float]]:
     rule = selected.get("ready_rule", plan.get("ready_rule"))
     rule_norm = str(rule).strip().upper() if rule not in (None, "") else "-"
+    if rule_norm == "S":
+        return (
+            rule_norm,
+            selected.get("ready_rule_mdd_pct", plan.get("ready_rule_mdd_pct")),
+        )
     if rule_norm not in ("A", "B", "C", "D"):
         rule_norm = "-"
 
@@ -148,14 +154,17 @@ def build_discord_message(
     conf = selected.get("confidence")
     atr_pct = selected.get("atr_pct")
     rule_norm, rule_mdd = _normalized_ready_rule(selected, plan)
-    rule_str = "-"
-    rule_mdd_str = "-"
-    if rule_norm in ("A", "B", "C", "D"):
-        rule_str = rule_norm
-        if rule_mdd is not None:
-            rule_mdd_str = f"{rule_mdd}%"
+    rule_str = rule_norm if rule_norm != "-" else "-"
+    rule_mdd_str = f"{rule_mdd}%" if rule_mdd is not None else "-"
     status_is_ready = str(status).upper() == "READY"
-    recommended_tp = _recommended_tp_by_rule(rule_norm) if status_is_ready else "-"
+    plan_recommended_tp = str(plan.get("recommended_tp_key") or "").strip().upper()
+    if status_is_ready:
+        if plan_recommended_tp in ("TP1", "TP2", "TP3"):
+            recommended_tp = plan_recommended_tp
+        else:
+            recommended_tp = _recommended_tp_by_rule(rule_norm)
+    else:
+        recommended_tp = "-"
     if recommended_tp == "-":
         recommended_tp = ""
     tp1_price = plan.get("tp1_price", "-")

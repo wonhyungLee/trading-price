@@ -64,14 +64,21 @@ AUTO_TRADE_READY_TP = {
     "C": "tp1_price",
 }
 AUTO_TRADE_PENDING_TTL_SEC = 24 * 60 * 60
+S_RULE_NAME = "S"
+S_RULE_ENTRY_TF = "30m"
+S_RULE_CONSENSUS_TFS = ("30m", "60m")
+S_RULE_COOLDOWN_SEC = 43200
+S_RULE_LONG_BASE_RULES = {"C"}
+S_RULE_SHORT_BASE_RULES = {"B", "C"}
+
 def _to_float(value: Any) -> Optional[float]:
     try:
         return float(value)
     except Exception:
         return None
 
-READY_RULE_NOTIFY_SET = {"A", "B", "C", "D"}
-READY_RULE_AUTO_TRADE_SET = {"A", "B", "C"}
+READY_RULE_NOTIFY_SET = {"A", "B", "C", "D", S_RULE_NAME}
+READY_RULE_AUTO_TRADE_SET = {"A", "B", "C", S_RULE_NAME}
 TIMEFRAME_SECONDS = {"30m": 1800, "60m": 3600, "180m": 10800}
 
 app = FastAPI(title="Wonyodd Reco Engine", version="1.0.0")
@@ -286,15 +293,146 @@ def _auto_trade_order_sides(side: str) -> tuple[str, str, str, str]:
         return "entry/sell", "close/buy", "숏OKX", "숏마감OKX"
     raise ValueError("side must be long or short")
 
+def _normalize_rule(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    return text if text else "-"
+
+def _rule_tp_key(rule_norm: str, side: str, base_rule: Any = None) -> Optional[str]:
+    rule = _normalize_rule(rule_norm)
+    if rule == S_RULE_NAME:
+        side_norm = str(side or "").strip().lower()
+        base = _normalize_rule(base_rule)
+        if side_norm == "short" and base == "B":
+            return "tp2_price"
+        return "tp1_price"
+    return AUTO_TRADE_READY_TP.get(rule)
+
+def _attach_recommended_tp_fields(rec: Dict[str, Any]) -> None:
+    if not isinstance(rec, dict):
+        return
+    plan = rec.get("plan") or {}
+    selected = rec.get("selected") or {}
+    if not isinstance(plan, dict) or not isinstance(selected, dict):
+        return
+    side = str(plan.get("side") or rec.get("side") or "").strip().lower()
+    rule_norm, _ = _resolve_ready_rule(selected, plan)
+    tp_key = _rule_tp_key(rule_norm, side, selected.get("ready_rule_base", plan.get("ready_rule_base")))
+    if not tp_key:
+        plan.pop("recommended_tp_key", None)
+        plan.pop("recommended_price", None)
+        return
+    if tp_key == "tp1_price":
+        plan["recommended_tp_key"] = "TP1"
+    elif tp_key == "tp2_price":
+        plan["recommended_tp_key"] = "TP2"
+    else:
+        plan["recommended_tp_key"] = "-"
+    plan["recommended_price"] = plan.get(tp_key)
+
+def _find_candidate(rec: Dict[str, Any], tf: str) -> Optional[Dict[str, Any]]:
+    candidates = rec.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        if str(cand.get("tf") or "").strip().lower() == str(tf).strip().lower():
+            return cand
+    return None
+
+def _is_ready_candidate(candidate: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    return str(candidate.get("status") or "").strip().lower() == "ready"
+
+def _apply_s_rule_to_recommendation(rec: Dict[str, Any], *, trigger_tf: Optional[str] = None) -> tuple[bool, str]:
+    if not isinstance(rec, dict) or not rec.get("ok"):
+        return False, "not_ok"
+
+    plan = rec.get("plan") or {}
+    selected = rec.get("selected") or {}
+    if not isinstance(plan, dict) or not isinstance(selected, dict):
+        return False, "missing_plan_selected"
+
+    side = str(plan.get("side") or rec.get("side") or "").strip().lower()
+    if side not in ("long", "short"):
+        return False, "invalid_side"
+
+    selected_tf = str(selected.get("tf") or plan.get("tf") or "").strip().lower()
+    if selected_tf != S_RULE_ENTRY_TF:
+        return False, "selected_tf_not_entry"
+    if trigger_tf is not None and str(trigger_tf).strip().lower() != S_RULE_ENTRY_TF:
+        return False, "trigger_tf_not_entry"
+
+    c30 = _find_candidate(rec, S_RULE_CONSENSUS_TFS[0])
+    c60 = _find_candidate(rec, S_RULE_CONSENSUS_TFS[1])
+    if c30 is None or c60 is None:
+        return False, "missing_consensus_tfs"
+    if not (_is_ready_candidate(c30) and _is_ready_candidate(c60)):
+        return False, "consensus_not_ready"
+
+    allowed_rules = S_RULE_LONG_BASE_RULES if side == "long" else S_RULE_SHORT_BASE_RULES
+    rule30 = _normalize_rule(c30.get("ready_rule"))
+    rule60 = _normalize_rule(c60.get("ready_rule"))
+    if rule30 not in allowed_rules or rule60 not in allowed_rules:
+        return False, f"consensus_rule_mismatch:{rule30}/{rule60}"
+
+    base_rule = _normalize_rule(selected.get("ready_rule"))
+    if base_rule not in allowed_rules:
+        if rule30 in allowed_rules:
+            base_rule = rule30
+        elif rule60 in allowed_rules:
+            base_rule = rule60
+    if base_rule not in allowed_rules:
+        return False, "base_rule_not_allowed"
+
+    selected["ready_rule_base"] = base_rule
+    plan["ready_rule_base"] = base_rule
+    selected["ready_rule"] = S_RULE_NAME
+    plan["ready_rule"] = S_RULE_NAME
+
+    base_mdd = selected.get("ready_rule_mdd_pct", plan.get("ready_rule_mdd_pct"))
+    if base_mdd is None:
+        if base_rule == rule30:
+            base_mdd = c30.get("ready_rule_mdd_pct")
+        elif base_rule == rule60:
+            base_mdd = c60.get("ready_rule_mdd_pct")
+    if base_mdd is not None:
+        selected["ready_rule_mdd_pct"] = base_mdd
+        plan["ready_rule_mdd_pct"] = base_mdd
+
+    _attach_recommended_tp_fields(rec)
+    return True, "ok"
+
+def _s_rule_global_cooldown_ok(now_ts: int) -> tuple[bool, Optional[int]]:
+    if S_RULE_COOLDOWN_SEC <= 0:
+        return True, None
+    latest_created: Optional[int] = None
+    for side in ("long", "short"):
+        row = db.fetch_latest_notification(f"ready:{S_RULE_ENTRY_TF}:{side}")
+        if not row:
+            continue
+        try:
+            created_ts = int(row["created_ts"])
+        except Exception:
+            continue
+        if latest_created is None or created_ts > latest_created:
+            latest_created = created_ts
+    if latest_created is None:
+        return True, None
+    return (now_ts - latest_created) >= S_RULE_COOLDOWN_SEC, latest_created
+
 def _resolve_ready_rule(selected: dict, plan: dict) -> tuple[str, Optional[float]]:
     rule = selected.get("ready_rule", plan.get("ready_rule"))
     rule_norm = str(rule).strip().upper() if rule else "-"
+    rule_mdd = selected.get("ready_rule_mdd_pct", plan.get("ready_rule_mdd_pct"))
+    if rule_norm == S_RULE_NAME:
+        return rule_norm, rule_mdd
     if rule_norm not in ("A", "B", "C", "D"):
         rule_norm = "-"
 
     sma_distance_pct = selected.get("sma_distance_pct", plan.get("sma_distance_pct"))
     atr_pct = selected.get("atr_pct", plan.get("atr_pct"))
-    rule_mdd = selected.get("ready_rule_mdd_pct", plan.get("ready_rule_mdd_pct"))
 
     if sma_distance_pct is not None and atr_pct is not None:
         resolved_rule, resolved_mdd = resolve_ready_rule(sma_distance_pct, atr_pct)
@@ -326,7 +464,7 @@ def _build_okx_auto_trade_order_tasks(
         "base": "BTC",
         "quote": "USDT.P",
         "type": "limit",
-        "amount": "0.01",
+        "amount": "0.05",
         "leverage": "50",
         "margin_mode": "cross",
     }
@@ -430,7 +568,7 @@ def _build_auto_trade_order_tasks(rec: Dict[str, Any]) -> list[Dict[str, Any]]:
     if rule_norm not in READY_RULE_AUTO_TRADE_SET:
         return []
 
-    tp_key = AUTO_TRADE_READY_TP.get(rule_norm)
+    tp_key = _rule_tp_key(rule_norm, side, selected.get("ready_rule_base", plan.get("ready_rule_base")))
     if tp_key is None:
         return []
 
@@ -438,6 +576,7 @@ def _build_auto_trade_order_tasks(rec: Dict[str, Any]) -> list[Dict[str, Any]]:
     tp_price = _to_float(plan.get(tp_key))
     if entry_price is None or tp_price is None:
         return []
+    _attach_recommended_tp_fields(rec)
 
     payloads = []
     payloads.extend(_build_okx_auto_trade_order_tasks(side, entry_price, tp_price))
@@ -485,7 +624,7 @@ def _queue_auto_trade_orders(rec: Dict[str, Any]) -> list[Dict[str, Any]]:
     selected = rec.get("selected") or {}
     rule_norm, _ = _resolve_ready_rule(selected, plan)
     side = str(plan.get("side") or rec.get("side") or "").strip().lower()
-    tp_key = AUTO_TRADE_READY_TP.get(rule_norm)
+    tp_key = _rule_tp_key(rule_norm, side, selected.get("ready_rule_base", plan.get("ready_rule_base")))
     tp_price = _to_float(plan.get(tp_key)) if tp_key else None
     orders = _build_auto_trade_order_tasks(rec)
     if not orders:
@@ -838,9 +977,16 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
 
     now = int(time.time())
     ctx = {"kind": "ready", "timeframe": tf, "ts": int(ts)}
+    s_sent_this_tick = False
     for side, rec in recs:
         if not rec or not rec.get("ok"):
             continue
+        applied_s, s_reason = _apply_s_rule_to_recommendation(rec, trigger_tf=tf)
+        if not applied_s:
+            if s_reason not in ("trigger_tf_not_entry", "selected_tf_not_entry"):
+                print(f"[DEBUG] Ready notify skipped (S rule gating): reason={s_reason} tf={tf} side={side}")
+            continue
+
         selected = rec.get("selected") or {}
         plan = rec.get("plan") or {}
         rule_norm, rule_mdd = _resolve_ready_rule(selected, plan)
@@ -852,6 +998,17 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
 
         kind = f"ready:{tf}:{side}"
         if db.notification_exists(kind, tf, ts):
+            continue
+
+        if s_sent_this_tick:
+            print("[DEBUG] Ready notify skipped (S rule one-entry-per-tick)")
+            continue
+
+        s_cooldown_ok, s_last_created = _s_rule_global_cooldown_ok(now)
+        if not s_cooldown_ok:
+            print(
+                f"[DEBUG] Ready notify skipped (S cooldown): last_created={s_last_created} cooldown={S_RULE_COOLDOWN_SEC}s"
+            )
             continue
 
         last = db.fetch_latest_notification(kind)
@@ -899,6 +1056,7 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
                 + json.dumps([(u, ok2, d) for u, ok2, d in forward_results], ensure_ascii=False)
             )
         if ok:
+            tp_key = _rule_tp_key(rule_norm, side, selected.get("ready_rule_base", plan.get("ready_rule_base")))
             db.insert_notification(
                 kind,
                 tf,
@@ -913,7 +1071,7 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
                     ensure_ascii=False,
                 ),
                 entry_price=plan.get("entry_price"),
-                recommended_price=plan.get(AUTO_TRADE_READY_TP.get(rule_norm)) if should_auto_trade else None,
+                recommended_price=plan.get(tp_key) if should_auto_trade and tp_key else None,
                 tp1_price=plan.get("tp1_price"),
                 tp2_price=plan.get("tp2_price"),
                 tp3_price=plan.get("tp3_price"),
@@ -921,6 +1079,7 @@ def _maybe_notify_ready(tf: str, ts: int, payload: WebhookPayload, *, force_bar_
                 ready_rule_mdd_pct=rule_mdd,
                 status=selected.get("status", plan.get("status")),
             )
+            s_sent_this_tick = True
 
 def _parse_ts(payload: WebhookPayload) -> int:
     # 1. ts field
@@ -949,7 +1108,7 @@ def _ready_notify_content(rec: dict) -> str:
     plan = (rec or {}).get("plan") or {}
     rule_norm, _ = _resolve_ready_rule(selected, plan)
 
-    if rule_norm in ("A", "B", "C", "D"):
+    if rule_norm in ("A", "B", "C", "D", S_RULE_NAME):
         return f"READY신호->추천({rule_norm})"
     return "READY신호->추천"
 
@@ -1227,6 +1386,10 @@ def candles(tf: str, limit: int = 200):
 def api_recommend(side: str, risk_pct: Optional[float] = None, tf: Optional[str] = None):
     try:
         out = recommend(side=side, risk_pct=risk_pct, focus_tf=tf)
+        if out.get("ok"):
+            tf_norm = tf_key(tf) if tf is not None else None
+            _apply_s_rule_to_recommendation(out, trigger_tf=tf_norm)
+            _attach_recommended_tp_fields(out)
         return JSONResponse(out)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1235,6 +1398,10 @@ def api_recommend(side: str, risk_pct: Optional[float] = None, tf: Optional[str]
 def api_notify_recommend(side: str, risk_pct: Optional[float] = None, tf: Optional[str] = None):
     try:
         out = recommend(side=side, risk_pct=risk_pct, focus_tf=tf)
+        if out.get("ok"):
+            tf_norm = tf_key(tf) if tf is not None else None
+            _apply_s_rule_to_recommendation(out, trigger_tf=tf_norm)
+            _attach_recommended_tp_fields(out)
         content = "추천"
         if (out.get("selected") or {}).get("status") == "ready":
             content = _ready_notify_content(out)
